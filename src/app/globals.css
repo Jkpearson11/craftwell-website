@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@theme {
+  /* Craftwell Brand Colors */
+  --color-navy-50:  #EEF1F4;
+  --color-navy-100: #D5DCE4;
+  --color-navy-200: #AABAC8;
+  --color-navy-300: #7A96AB;
+  --color-navy-400: #4E738E;
+  --color-navy-500: #273E4F;
+  --color-navy-600: #1F3240;
+  --color-navy-700: #172531;
+  --color-navy-800: #0F1921;
+  --color-navy-900: #080D11;
+
+  --color-forest-50:  #EDEEED;
+  --color-forest-100: #D3D6D3;
+  --color-forest-200: #A8AEA9;
+  --color-forest-300: #7D877E;
+  --color-forest-400: #576060;
+  --color-forest-500: #3F4F44;
+  --color-forest-600: #333F37;
+  --color-forest-700: #27302A;
+  --color-forest-800: #1B201C;
+  --color-forest-900: #0D100E;
+
+  --color-tan-50:  #F8F3EF;
+  --color-tan-100: #EDE3D9;
+  --color-tan-200: #DAC7B3;
+  --color-tan-300: #C7AB8D;
+  --color-tan-400: #B49068;
+  --color-tan-500: #A27B5C;
+  --color-tan-600: #82624A;
+  --color-tan-700: #614937;
+  --color-tan-800: #413125;
+  --color-tan-900: #201812;
+
+  --color-cream-50:  #FDFCFB;
+  --color-cream-100: #F7F4F1;
+  --color-cream-200: #EDE8E1;
+  --color-cream-300: #DCD7C9;
+  --color-cream-400: #C8C0AF;
+  --color-cream-500: #B3A994;
+  --color-cream-600: #9A8E7A;
+  --color-cream-700: #7A7161;
+  --color-cream-800: #5A5347;
+  --color-cream-900: #3A352E;
+
+  --font-sans: var(--font-geist-sans);
+  --font-serif: var(--font-playfair);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #FDFCFB;
+  color: #273E4F;
+}
