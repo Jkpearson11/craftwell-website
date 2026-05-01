@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><title>Contact Form</title></head>
+<body>
+  <!--
+    Netlify form detection page.
+    This is a plain HTML version of the contact form that allows Netlify's
+    build bot to register the form. The actual user-facing form is in React.
+    Do not delete this file.
+  -->
+  <form
+    name="contact"
+    method="POST"
+    data-netlify="true"
+    netlify-honeypot="bot-field"
+  >
+    <input type="hidden" name="form-name" value="contact" />
+    <p hidden><input name="bot-field" /></p>
+    <input name="name" type="text" placeholder="Full Name" />
+    <input name="email" type="email" placeholder="Email" />
+    <input name="phone" type="tel" placeholder="Phone" />
+    <select name="projectType">
+      <option value="">Select one</option>
+      <option value="Kitchen Renovation">Kitchen Renovation</option>
+      <option value="Bathroom Remodel">Bathroom Remodel</option>
+      <option value="Full-Scale Remodel">Full-Scale Remodel</option>
+      <option value="Water Damage Restoration">Water Damage Restoration</option>
+      <option value="Home Addition">Home Addition</option>
+      <option value="Repairs & Maintenance">Repairs &amp; Maintenance</option>
+      <option value="Other">Other</option>
+    </select>
+    <input name="budget" type="text" placeholder="Budget" />
+    <textarea name="message" placeholder="Message"></textarea>
+    <button type="submit">Submit</button>
+  </form>
+</body>
+</html>

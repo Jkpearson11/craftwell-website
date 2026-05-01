@@ -2,6 +2,11 @@
 
 import { useState } from "react";
 
+// ─── Replace this with your Web3Forms access key ───────────────────────────
+// Get one free at https://web3forms.com — enter info@craftwellconstruction.com
+const WEB3FORMS_KEY = "c53aab8c-a2d0-4ea5-89fd-0bf6fd9e3209";
+// ───────────────────────────────────────────────────────────────────────────
+
 const contactInfo = [
   {
     label: "Phone",
@@ -15,7 +20,7 @@ const contactInfo = [
   },
   {
     label: "Location",
-    value: "Garland, TX — Serving the Greater DFW Area",
+    value: "Serving the Greater DFW Area",
     href: null,
   },
 ];
@@ -43,21 +48,58 @@ export default function Contact() {
     name: "", email: "", phone: "", projectType: "", budget: "", message: "",
   });
   const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+  ) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    // TODO: wire up to your form backend (Resend, Formspree, etc.)
-    setSubmitted(true);
+    setLoading(true);
+    setError(false);
+
+    const subject = `New Project Inquiry – Craftwell | ${form.projectType || "General"} from ${form.name}`;
+
+    const payload = {
+      access_key: WEB3FORMS_KEY,
+      subject,
+      from_name: "Craftwell Website",
+      name: form.name,
+      email: form.email,
+      phone: form.phone || "Not provided",
+      project_type: form.projectType,
+      budget: form.budget || "Not specified",
+      message: form.message || "No message provided",
+    };
+
+    try {
+      const res = await fetch("https://api.web3forms.com/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSubmitted(true);
+      } else {
+        setError(true);
+      }
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <section id="contact" className="py-28 bg-cream-100">
       <div className="max-w-7xl mx-auto px-6 lg:px-8">
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-16">
+
           {/* Left: Info */}
           <div className="lg:col-span-2">
             <p className="text-tan-500 text-xs tracking-[0.3em] uppercase mb-4">
@@ -119,31 +161,51 @@ export default function Contact() {
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="space-y-6">
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div>
-                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Full Name *</label>
-                    <input type="text" name="name" required value={form.name} onChange={handleChange}
+                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                      Full Name *
+                    </label>
+                    <input
+                      type="text" name="name" required
+                      value={form.name} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
-                      placeholder="Jane Smith" />
+                      placeholder="Jane Smith"
+                    />
                   </div>
                   <div>
-                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Email Address *</label>
-                    <input type="email" name="email" required value={form.email} onChange={handleChange}
+                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                      Email Address *
+                    </label>
+                    <input
+                      type="email" name="email" required
+                      value={form.email} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
-                      placeholder="jane@example.com" />
+                      placeholder="jane@example.com"
+                    />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div>
-                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Phone Number</label>
-                    <input type="tel" name="phone" value={form.phone} onChange={handleChange}
+                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                      Phone Number
+                    </label>
+                    <input
+                      type="tel" name="phone"
+                      value={form.phone} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
-                      placeholder="(817) 555-0100" />
+                      placeholder="(817) 555-0100"
+                    />
                   </div>
                   <div>
-                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Project Type *</label>
-                    <select name="projectType" required value={form.projectType} onChange={handleChange}
+                    <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                      Project Type *
+                    </label>
+                    <select
+                      name="projectType" required
+                      value={form.projectType} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors appearance-none">
                       <option value="" disabled>Select one</option>
                       {projectTypes.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -152,10 +214,13 @@ export default function Contact() {
                 </div>
 
                 <div>
-                  <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Estimated Budget</label>
+                  <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                    Estimated Budget
+                  </label>
                   <div className="flex flex-wrap gap-3">
                     {budgetRanges.map((range) => (
-                      <button type="button" key={range}
+                      <button
+                        type="button" key={range}
                         onClick={() => setForm((prev) => ({ ...prev, budget: range }))}
                         className={`px-4 py-2 text-xs tracking-wider border transition-colors duration-150 ${
                           form.budget === range
@@ -169,20 +234,34 @@ export default function Contact() {
                 </div>
 
                 <div>
-                  <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">Tell Us About Your Project</label>
-                  <textarea name="message" rows={5} value={form.message} onChange={handleChange}
+                  <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
+                    Tell Us About Your Project
+                  </label>
+                  <textarea
+                    name="message" rows={5}
+                    value={form.message} onChange={handleChange}
                     className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors resize-none"
-                    placeholder="Describe your project goals, timeline, or any specific questions..." />
+                    placeholder="Describe your project goals, timeline, or any specific questions..."
+                  />
                 </div>
 
-                <button type="submit"
-                  className="w-full py-4 bg-navy-500 text-white text-sm tracking-widest uppercase hover:bg-tan-600 transition-colors duration-200">
-                  Request a Free Consultation
+                {error && (
+                  <p className="text-red-600 text-sm text-center">
+                    Something went wrong. Please try again or call us at (817) 899-0624.
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-4 bg-navy-500 text-white text-sm tracking-widest uppercase hover:bg-tan-600 transition-colors duration-200 disabled:opacity-60 disabled:cursor-not-allowed">
+                  {loading ? "Sending…" : "Request a Free Consultation"}
                 </button>
 
                 <p className="text-cream-500 text-xs text-center">
                   By submitting, you agree to our privacy policy. We never share your information.
                 </p>
+
               </form>
             )}
           </div>
