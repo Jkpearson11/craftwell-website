@@ -13,6 +13,58 @@ const today        = () => new Date().toISOString().split("T")[0];
 const emptyRow     = (): TxRow       => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
 const emptyBudget  = (): BudgetLine  => ({ itemCode: "", budget: "" });
 
+// ── CrmField ───────────────────────────────────────────────────────────────
+// Defined OUTSIDE BudgetManager so React never treats it as a new component
+// on re-render (which would unmount the input and lose focus on every keystroke).
+type CrmFieldProps = {
+  col:            string;
+  value:          string;
+  onChange:       (col: string, val: string) => void;
+  pipelineStages: string[];
+  wide?:          boolean;
+};
+
+const inputClass = "w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
+const labelClass = "block text-navy-400 text-xs tracking-widest uppercase mb-2";
+
+function CrmField({ col, value, onChange, pipelineStages, wide = false }: CrmFieldProps) {
+  const upper   = col.toUpperCase();
+  const isStage = upper === "PIPELINE STAGE";
+  const isDate  = upper.includes("DATE");
+  const isWide  = wide || upper.includes("DESCRIPTION") || upper.includes("NOTES");
+
+  return (
+    <div className={isWide ? "sm:col-span-2" : ""}>
+      <label className={labelClass}>{col}</label>
+      {isStage ? (
+        <select
+          value={value}
+          onChange={e => onChange(col, e.target.value)}
+          className={inputClass}
+        >
+          <option value="">Select stage…</option>
+          {pipelineStages.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      ) : isDate ? (
+        <input
+          type="date"
+          value={value}
+          onChange={e => onChange(col, e.target.value)}
+          className={inputClass}
+        />
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(col, e.target.value)}
+          className={inputClass}
+          placeholder={col}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function BudgetManager() {
 
   // ── Shared ──────────────────────────────────────────────────────────────
@@ -178,29 +230,12 @@ export default function BudgetManager() {
   };
 
   // ── Style shortcuts ───────────────────────────────────────────────────────
-  const inputClass  = "w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
   const innerClass  = "w-full bg-cream-100 border border-cream-300 px-3 py-2 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
-  const labelClass  = "block text-navy-400 text-xs tracking-widest uppercase mb-2";
   const addBtnClass = "text-xs tracking-wider px-4 py-2 border border-tan-500 text-tan-600 hover:bg-tan-500 hover:text-white transition-colors flex-shrink-0 ml-4";
   const submitClass = "w-full py-4 bg-navy-500 text-white text-sm tracking-widest uppercase hover:bg-tan-600 transition-colors duration-200 disabled:opacity-60 disabled:cursor-not-allowed";
 
   // CRM columns without Lead ID (it's auto-generated)
   const editableCrmCols = crmColumns.filter(c => c.toUpperCase() !== "LEAD ID");
-
-  // Render a single CRM field (stage gets a select, others get text input)
-  const CrmField = ({ col, wide = false }: { col: string; wide?: boolean }) => (
-    <div className={wide ? "sm:col-span-2" : ""}>
-      <label className={labelClass}>{col}</label>
-      {col.toUpperCase() === "PIPELINE STAGE" ? (
-        <select value={crmForm[col] || ""} onChange={e => updateCrmField(col, e.target.value)} className={inputClass}>
-          <option value="">Select stage…</option>
-          {pipelineStages.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
-      ) : (
-        <input value={crmForm[col] || ""} onChange={e => updateCrmField(col, e.target.value)} className={inputClass} placeholder={col} />
-      )}
-    </div>
-  );
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -447,8 +482,13 @@ export default function BudgetManager() {
                     ) : (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                         {editableCrmCols.map(col => (
-                          <CrmField key={col} col={col}
-                            wide={col.toUpperCase().includes("DESCRIPTION") || col.toUpperCase().includes("NOTES")} />
+                          <CrmField
+                            key={col}
+                            col={col}
+                            value={crmForm[col] || ""}
+                            onChange={updateCrmField}
+                            pipelineStages={pipelineStages}
+                          />
                         ))}
                       </div>
                     )}
@@ -485,8 +525,13 @@ export default function BudgetManager() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                           {editableCrmCols.map(col => (
-                            <CrmField key={col} col={col}
-                              wide={col.toUpperCase().includes("DESCRIPTION") || col.toUpperCase().includes("NOTES")} />
+                            <CrmField
+                              key={col}
+                              col={col}
+                              value={crmForm[col] || ""}
+                              onChange={updateCrmField}
+                              pipelineStages={pipelineStages}
+                            />
                           ))}
                         </div>
 
