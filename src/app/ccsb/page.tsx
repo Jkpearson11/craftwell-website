@@ -6,7 +6,7 @@ import { useState, useEffect } from "react";
 type CostCode  = { code: string; description: string };
 type TxRow     = { itemCode: string; amount: string; vendor: string; date: string; description: string };
 type BudgetLine = { itemCode: string; budget: string };
-type CrmLead   = { rowIndex: number; leadId: string; clientName: string; projectDesc: string; data: Record<string, string> };
+type CrmLead   = { rowIndex: number; leadId: string; clientName: string; address: string; projectDesc: string; data: Record<string, string> };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const today        = () => new Date().toISOString().split("T")[0];
@@ -114,7 +114,11 @@ export default function BudgetManager() {
       .then(d => {
         setJobs(d.jobs || []);
         setCostCodes(d.costCodes || []);
-        setCrmLeads(d.crmLeads || []);
+        const leads: CrmLead[] = (d.crmLeads || []).map((l: CrmLead) => {
+          const addrKey = Object.keys(l.data).find(k => k.toUpperCase().includes("ADDRESS")) || "";
+          return { ...l, address: addrKey ? l.data[addrKey] : "" };
+        });
+        setCrmLeads(leads);
         setPipelineStages(d.pipelineStages || []);
         setCrmColumns(d.crmColumns || []);
         if (d.error) setLoadError(true);
@@ -510,6 +514,7 @@ export default function BudgetManager() {
                         {crmLeads.map(l => (
                           <option key={l.leadId} value={l.leadId}>
                             {l.clientName || l.leadId}
+                            {l.address    ? ` — ${l.address}`    : ""}
                             {l.projectDesc ? ` — ${l.projectDesc}` : ""}
                             {` (${l.leadId})`}
                           </option>
