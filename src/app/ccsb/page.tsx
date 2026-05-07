@@ -198,10 +198,12 @@ export default function BudgetManager() {
       const data = await res.json();
       setResult({ success: data.success, message: data.message || data.error });
       if (data.success) {
+        const addrKey = Object.keys(crmForm).find(k => k.toUpperCase().includes("ADDRESS")) || "";
         const newLead: CrmLead = {
           rowIndex: -1,
           leadId: data.leadId || previewLeadId,
           clientName: crmForm["CLIENT NAME"] || crmForm["Client Name"] || "",
+          address: addrKey ? crmForm[addrKey] : "",
           projectDesc: crmForm["PROJECT DESCRIPTION"] || crmForm["Project Description"] || "",
           data: { ...crmForm, "Lead ID": data.leadId || previewLeadId },
         };
