@@ -3,91 +3,100 @@
 import { useState, useEffect } from "react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
-type CostCode  = { code: string; description: string };
-type TxRow     = { itemCode: string; amount: string; vendor: string; date: string; description: string };
+type CostCode   = { code: string; description: string };
+type TxRow      = { itemCode: string; amount: string; vendor: string; date: string; description: string };
 type BudgetLine = { itemCode: string; budget: string };
-type CrmLead   = { rowIndex: number; leadId: string; clientName: string; address: string; projectDesc: string; data: Record<string, string> };
+type CrmLead    = { rowIndex: number; leadId: string; clientName: string; address: string; projectDesc: string; data: Record<string, string> };
+type JobBudget  = { headers: string[]; rows: string[][] };
+type SummaryRow = { jobName: string; values: string[] };
+
+// ── Constants ──────────────────────────────────────────────────────────────
+// Labels matching C2:C11 in each job sheet
+const SUMMARY_LABELS = [
+  "Client Name",      // C2
+  "Address",          // C3
+  "Scope of Work",    // C4
+  "Sold Date",        // C5
+  "Completed Date",   // C6
+  "Contract Value",   // C7
+  "Operating Budget", // C8
+  "Starting Margin",  // C9
+  "Current Spend",    // C10
+  "Current Margin",   // C11
+];
+const SOLD_DATE_IDX   = 3; // 0-based index into values[] → C5
+const EXCLUDED_STAGES = ["COMPLETED", "DEAD", "LOST"];
+const QUARTER_LABELS  = ["Q1 (Jan–Mar)", "Q2 (Apr–Jun)", "Q3 (Jul–Sep)", "Q4 (Oct–Dec)"];
+const MONTH_NAMES     = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-const today        = () => new Date().toISOString().split("T")[0];
-const emptyRow     = (): TxRow       => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
-const emptyBudget  = (): BudgetLine  => ({ itemCode: "", budget: "" });
+const today       = () => new Date().toISOString().split("T")[0];
+const emptyRow    = (): TxRow      => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
+const emptyBudget = (): BudgetLine => ({ itemCode: "", budget: "" });
+
+// ── Shared style constants (module-level so they never cause re-mount) ─────
+const inputClass = "w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
+const labelClass = "block text-navy-400 text-xs tracking-widest uppercase mb-2";
 
 // ── CrmField ───────────────────────────────────────────────────────────────
-// Defined OUTSIDE BudgetManager so React never treats it as a new component
-// on re-render (which would unmount the input and lose focus on every keystroke).
+// MUST live outside BudgetManager — if defined inside, every keystroke causes
+// React to treat it as a new component type and unmount/remount the input.
 type CrmFieldProps = {
   col:            string;
   value:          string;
   onChange:       (col: string, val: string) => void;
   pipelineStages: string[];
-  wide?:          boolean;
 };
 
-const inputClass = "w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
-const labelClass = "block text-navy-400 text-xs tracking-widest uppercase mb-2";
-
-function CrmField({ col, value, onChange, pipelineStages, wide = false }: CrmFieldProps) {
+function CrmField({ col, value, onChange, pipelineStages }: CrmFieldProps) {
   const upper   = col.toUpperCase();
   const isStage = upper === "PIPELINE STAGE";
   const isDate  = upper.includes("DATE");
-  const isWide  = wide || upper.includes("DESCRIPTION") || upper.includes("NOTES");
+  const isWide  = upper.includes("DESCRIPTION") || upper.includes("NOTES") || upper.includes("SCOPE");
 
   return (
     <div className={isWide ? "sm:col-span-2" : ""}>
       <label className={labelClass}>{col}</label>
       {isStage ? (
-        <select
-          value={value}
-          onChange={e => onChange(col, e.target.value)}
-          className={inputClass}
-        >
+        <select value={value} onChange={e => onChange(col, e.target.value)} className={inputClass}>
           <option value="">Select stage…</option>
           {pipelineStages.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
       ) : isDate ? (
-        <input
-          type="date"
-          value={value}
-          onChange={e => onChange(col, e.target.value)}
-          className={inputClass}
-        />
+        <input type="date" value={value} onChange={e => onChange(col, e.target.value)} className={inputClass} />
       ) : (
-        <input
-          type="text"
-          value={value}
-          onChange={e => onChange(col, e.target.value)}
-          className={inputClass}
-          placeholder={col}
-        />
+        <input type="text" value={value} onChange={e => onChange(col, e.target.value)} className={inputClass} placeholder={col} />
       )}
     </div>
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
 export default function BudgetManager() {
 
-  // ── Shared ──────────────────────────────────────────────────────────────
-  const [loading,   setLoading]   = useState(true);
-  const [loadError, setLoadError] = useState(false);
-  const [jobs,      setJobs]      = useState<string[]>([]);
-  const [costCodes, setCostCodes] = useState<CostCode[]>([]);
-  const [activeTab, setActiveTab] = useState<"new-job" | "transaction" | "crm">("new-job");
+  // ── Shared ────────────────────────────────────────────────────────────────
+  const [loading,    setLoading]    = useState(true);
+  const [loadError,  setLoadError]  = useState(false);
+  const [jobs,       setJobs]       = useState<string[]>([]);
+  const [costCodes,  setCostCodes]  = useState<CostCode[]>([]);
+  const [activeTab,  setActiveTab]  = useState<"new-job" | "transaction" | "crm" | "summary">("new-job");
   const [submitting, setSubmitting] = useState(false);
-  const [result,    setResult]    = useState<{ success: boolean; message: string } | null>(null);
+  const [result,     setResult]     = useState<{ success: boolean; message: string } | null>(null);
 
-  // ── New Job ──────────────────────────────────────────────────────────────
+  // ── New Job ───────────────────────────────────────────────────────────────
   const [jobForm, setJobForm] = useState({
     jobName: "", clientName: "", address: "", scopeOfWork: "",
     contractValue: "", operatingBudget: "", startingMargin: "",
   });
   const [budgetLines, setBudgetLines] = useState<BudgetLine[]>([emptyBudget()]);
 
-  // ── Transactions ─────────────────────────────────────────────────────────
-  const [selectedJob, setSelectedJob] = useState("");
-  const [rows,        setRows]        = useState<TxRow[]>([emptyRow()]);
+  // ── Transactions ──────────────────────────────────────────────────────────
+  const [selectedJob,   setSelectedJob]   = useState("");
+  const [rows,          setRows]          = useState<TxRow[]>([emptyRow()]);
+  const [jobBudget,     setJobBudget]     = useState<JobBudget | null>(null);
+  const [budgetLoading, setBudgetLoading] = useState(false);
 
-  // ── CRM ──────────────────────────────────────────────────────────────────
+  // ── CRM ───────────────────────────────────────────────────────────────────
   const [crmSubTab,      setCrmSubTab]      = useState<"new-lead" | "edit-lead">("new-lead");
   const [crmLeads,       setCrmLeads]       = useState<CrmLead[]>([]);
   const [pipelineStages, setPipelineStages] = useState<string[]>([]);
@@ -95,19 +104,63 @@ export default function BudgetManager() {
   const [selectedLeadId, setSelectedLeadId] = useState("");
   const [crmForm,        setCrmForm]        = useState<Record<string, string>>({});
 
-  // Preview next Lead ID (client-side, matches server logic)
+  // ── Summary ───────────────────────────────────────────────────────────────
+  const [summaryData,    setSummaryData]    = useState<SummaryRow[]>([]);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [filterYear,     setFilterYear]     = useState("all");
+  const [filterQuarter,  setFilterQuarter]  = useState("all");
+  const [filterMonth,    setFilterMonth]    = useState("all");
+
+  // ── Computed ──────────────────────────────────────────────────────────────
+
+  // Leads still in process — exclude completed/dead/lost from Edit Lead dropdown
+  const activeLeads = crmLeads.filter(l => {
+    const stage = (l.data["PIPELINE STAGE"] || "").toUpperCase().trim();
+    return !EXCLUDED_STAGES.includes(stage);
+  });
+
+  // CRM columns: drop Lead ID (auto-generated) and any "days to" calculated fields
+  const editableCrmCols = crmColumns.filter(c =>
+    c.toUpperCase() !== "LEAD ID" &&
+    !c.toUpperCase().includes("DAYS TO")
+  );
+
+  // New lead IDs use IP- prefix (In Process)
   const previewLeadId = (() => {
-    const now  = new Date();
-    const yy   = String(now.getFullYear()).slice(2);
-    const mm   = String(now.getMonth() + 1).padStart(2, "0");
-    const max  = crmLeads.reduce((n, l) => {
-      const m = l.leadId.match(/CW-\d{4}(\d{3})/);
+    const now = new Date();
+    const yy  = String(now.getFullYear()).slice(2);
+    const mm  = String(now.getMonth() + 1).padStart(2, "0");
+    const max = crmLeads.reduce((n, l) => {
+      const m = l.leadId.match(/(?:CW|IP)-\d{4}(\d{3})/);
       return m ? Math.max(n, parseInt(m[1])) : n;
     }, 0);
-    return `CW-${yy}${mm}${String(max + 1).padStart(3, "0")}`;
+    return `IP-${yy}${mm}${String(max + 1).padStart(3, "0")}`;
   })();
 
-  // ── Load sheet data on mount ─────────────────────────────────────────────
+  // Summary filter helpers
+  const availableYears = [...new Set(
+    summaryData
+      .map(r => r.values[SOLD_DATE_IDX])
+      .filter(Boolean)
+      .map(d => { const y = new Date(d).getFullYear(); return isNaN(y) ? null : String(y); })
+      .filter((y): y is string => y !== null)
+  )].sort();
+
+  const filteredSummary = summaryData.filter(row => {
+    const ds = row.values[SOLD_DATE_IDX];
+    if (!ds) return filterYear === "all" && filterQuarter === "all" && filterMonth === "all";
+    const d = new Date(ds);
+    if (isNaN(d.getTime())) return true;
+    const yr = String(d.getFullYear());
+    const mo = String(d.getMonth() + 1);
+    const qt = String(Math.ceil((d.getMonth() + 1) / 3));
+    if (filterYear    !== "all" && yr !== filterYear)    return false;
+    if (filterQuarter !== "all" && qt !== filterQuarter) return false;
+    if (filterMonth   !== "all" && mo !== filterMonth)   return false;
+    return true;
+  });
+
+  // ── Load sheet data on mount ──────────────────────────────────────────────
   useEffect(() => {
     fetch("/api/sheet-data")
       .then(r => r.json())
@@ -127,24 +180,49 @@ export default function BudgetManager() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Load summary data when Summary tab is first opened
+  useEffect(() => {
+    if (activeTab !== "summary") return;
+    setSummaryLoading(true);
+    fetch("/api/summary-data")
+      .then(r => r.json())
+      .then(d => setSummaryData(d.rows || []))
+      .catch(() => {})
+      .finally(() => setSummaryLoading(false));
+  }, [activeTab]);
+
   // ── Field helpers ─────────────────────────────────────────────────────────
   const handleJobField = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setJobForm(p => ({ ...p, [e.target.name]: e.target.value }));
 
-  const updateRow       = (i: number, f: keyof TxRow,     v: string) => setRows(p => p.map((r, idx) => idx === i ? { ...r, [f]: v } : r));
-  const addRow          = () => setRows(p => [...p, emptyRow()]);
-  const removeRow       = (i: number) => setRows(p => p.filter((_, idx) => idx !== i));
+  const updateRow        = (i: number, f: keyof TxRow,      v: string) => setRows(p => p.map((r, idx) => idx === i ? { ...r, [f]: v } : r));
+  const addRow           = () => setRows(p => [...p, emptyRow()]);
+  const removeRow        = (i: number) => setRows(p => p.filter((_, idx) => idx !== i));
 
-  const updateBudget    = (i: number, f: keyof BudgetLine, v: string) => setBudgetLines(p => p.map((l, idx) => idx === i ? { ...l, [f]: v } : l));
-  const addBudgetLine   = () => setBudgetLines(p => [...p, emptyBudget()]);
+  const updateBudget     = (i: number, f: keyof BudgetLine, v: string) => setBudgetLines(p => p.map((l, idx) => idx === i ? { ...l, [f]: v } : l));
+  const addBudgetLine    = () => setBudgetLines(p => [...p, emptyBudget()]);
   const removeBudgetLine = (i: number) => setBudgetLines(p => p.filter((_, idx) => idx !== i));
 
-  const updateCrmField  = (col: string, v: string) => setCrmForm(p => ({ ...p, [col]: v }));
+  const updateCrmField   = (col: string, v: string) => setCrmForm(p => ({ ...p, [col]: v }));
 
   const handleLeadSelect = (leadId: string) => {
     setSelectedLeadId(leadId);
     const lead = crmLeads.find(l => l.leadId === leadId);
     if (lead) setCrmForm({ ...lead.data });
+  };
+
+  // Fetch committed cost table whenever job selection changes
+  const handleJobSelect = async (jobName: string) => {
+    setSelectedJob(jobName);
+    setJobBudget(null);
+    if (!jobName) return;
+    setBudgetLoading(true);
+    try {
+      const res  = await fetch(`/api/job-budget?jobName=${encodeURIComponent(jobName)}`);
+      const data = await res.json();
+      if (!data.error) setJobBudget(data);
+    } catch {}
+    finally { setBudgetLoading(false); }
   };
 
   // ── Submit: New Job ───────────────────────────────────────────────────────
@@ -153,8 +231,7 @@ export default function BudgetManager() {
     setSubmitting(true); setResult(null);
     try {
       const res  = await fetch("/api/new-job", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...jobForm, budgetLines }),
       });
       const data = await res.json();
@@ -174,8 +251,7 @@ export default function BudgetManager() {
     setSubmitting(true); setResult(null);
     try {
       const res  = await fetch("/api/add-transactions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobName: selectedJob, transactions: rows }),
       });
       const data = await res.json();
@@ -191,8 +267,7 @@ export default function BudgetManager() {
     setSubmitting(true); setResult(null);
     try {
       const res  = await fetch("/api/crm-lead", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "addLead", fields: crmForm }),
       });
       const data = await res.json();
@@ -200,10 +275,10 @@ export default function BudgetManager() {
       if (data.success) {
         const addrKey = Object.keys(crmForm).find(k => k.toUpperCase().includes("ADDRESS")) || "";
         const newLead: CrmLead = {
-          rowIndex: -1,
-          leadId: data.leadId || previewLeadId,
-          clientName: crmForm["CLIENT NAME"] || crmForm["Client Name"] || "",
-          address: addrKey ? crmForm[addrKey] : "",
+          rowIndex:    -1,
+          leadId:      data.leadId || previewLeadId,
+          clientName:  crmForm["CLIENT NAME"]        || crmForm["Client Name"]        || "",
+          address:     addrKey ? crmForm[addrKey]    : "",
           projectDesc: crmForm["PROJECT DESCRIPTION"] || crmForm["Project Description"] || "",
           data: { ...crmForm, "Lead ID": data.leadId || previewLeadId },
         };
@@ -222,8 +297,7 @@ export default function BudgetManager() {
     setSubmitting(true); setResult(null);
     try {
       const res  = await fetch("/api/crm-lead", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "updateLead", rowIndex: lead.rowIndex, fields: crmForm }),
       });
       const data = await res.json();
@@ -240,16 +314,13 @@ export default function BudgetManager() {
   const addBtnClass = "text-xs tracking-wider px-4 py-2 border border-tan-500 text-tan-600 hover:bg-tan-500 hover:text-white transition-colors flex-shrink-0 ml-4";
   const submitClass = "w-full py-4 bg-navy-500 text-white text-sm tracking-widest uppercase hover:bg-tan-600 transition-colors duration-200 disabled:opacity-60 disabled:cursor-not-allowed";
 
-  // CRM columns without Lead ID (it's auto-generated)
-  const editableCrmCols = crmColumns.filter(c => c.toUpperCase() !== "LEAD ID");
-
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-cream-100">
 
       {/* Header */}
       <div className="bg-navy-500 px-6 py-5">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-5xl mx-auto">
           <p className="text-tan-300 text-xs tracking-[0.3em] uppercase mb-1">Craftwell Construction</p>
           <h1 className="text-white text-2xl font-semibold" style={{ fontFamily: "var(--font-playfair)" }}>
             Budget Manager
@@ -257,7 +328,7 @@ export default function BudgetManager() {
         </div>
       </div>
 
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
 
         {loading && (
           <div className="text-center py-20">
@@ -267,21 +338,22 @@ export default function BudgetManager() {
 
         {!loading && loadError && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-6 py-4 text-sm mb-6">
-            Could not connect to Google Sheets. Check the APPS_SCRIPT_URL environment variable in Netlify
-            and make sure the Apps Script is deployed as a web app.
+            Could not connect to Google Sheets. Check the APPS_SCRIPT_URL environment variable and make sure the Apps Script is deployed.
           </div>
         )}
 
         {!loading && (
           <>
             {/* ── Main tabs ── */}
-            <div className="flex border-b border-cream-300 mb-8">
-              {(["new-job", "transaction", "crm"] as const).map(tab => (
+            <div className="flex border-b border-cream-300 mb-8 overflow-x-auto">
+              {(["new-job", "transaction", "crm", "summary"] as const).map(tab => (
                 <button key={tab} onClick={() => { setActiveTab(tab); setResult(null); }}
-                  className={`px-6 py-3 text-xs tracking-widest uppercase font-medium transition-colors ${
-                    activeTab === tab ? "border-b-2 border-tan-500 text-tan-600" : "text-navy-400 hover:text-navy-600"
+                  className={`px-5 py-3 text-xs tracking-widest uppercase font-medium transition-colors whitespace-nowrap ${
+                    activeTab === tab
+                      ? "border-b-2 border-tan-500 text-tan-600"
+                      : "text-navy-400 hover:text-navy-600"
                   }`}>
-                  {tab === "new-job" ? "New Job" : tab === "transaction" ? "Add Transactions" : "CRM"}
+                  {tab === "new-job" ? "New Job" : tab === "transaction" ? "Add Transactions" : tab === "crm" ? "CRM" : "Summary"}
                 </button>
               ))}
             </div>
@@ -289,7 +361,9 @@ export default function BudgetManager() {
             {/* Result banner */}
             {result && (
               <div className={`px-5 py-4 mb-6 text-sm border ${
-                result.success ? "bg-green-50 text-green-800 border-green-200" : "bg-red-50 text-red-700 border-red-200"
+                result.success
+                  ? "bg-green-50 text-green-800 border-green-200"
+                  : "bg-red-50 text-red-700 border-red-200"
               }`}>
                 {result.message}
               </div>
@@ -348,7 +422,6 @@ export default function BudgetManager() {
                     </div>
                     <button type="button" onClick={addBudgetLine} className={addBtnClass}>+ Add Line</button>
                   </div>
-
                   <div className="space-y-3">
                     {budgetLines.map((line, i) => (
                       <div key={i} className="bg-white border border-cream-300 p-4">
@@ -391,18 +464,54 @@ export default function BudgetManager() {
 
                 <div>
                   <label className={labelClass}>Select Job *</label>
-                  <select required value={selectedJob} onChange={e => setSelectedJob(e.target.value)} className={inputClass}>
+                  <select required value={selectedJob} onChange={e => handleJobSelect(e.target.value)} className={inputClass}>
                     <option value="" disabled>Choose a job…</option>
                     {jobs.map(j => <option key={j} value={j}>{j}</option>)}
                   </select>
                 </div>
 
+                {/* ── Committed Cost Table ── */}
+                {selectedJob && (
+                  <div className="border border-cream-300 bg-white">
+                    <div className="px-4 py-3 border-b border-cream-200 flex items-center justify-between bg-cream-50">
+                      <p className="text-navy-400 text-xs tracking-widest uppercase font-semibold">Committed Cost Budget — {selectedJob}</p>
+                      {budgetLoading && <span className="text-cream-500 text-xs animate-pulse">Loading…</span>}
+                    </div>
+                    {!budgetLoading && jobBudget && jobBudget.rows.length > 0 ? (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-navy-500/5 border-b border-cream-200">
+                              {jobBudget.headers.map((h, i) => (
+                                <th key={i} className="px-4 py-2 text-left text-navy-400 tracking-wider uppercase font-medium whitespace-nowrap">
+                                  {h || `Col ${i + 1}`}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {jobBudget.rows.map((row, ri) => (
+                              <tr key={ri} className={`border-b border-cream-100 ${ri % 2 === 0 ? "bg-white" : "bg-cream-50"}`}>
+                                {row.map((cell, ci) => (
+                                  <td key={ci} className="px-4 py-2 text-navy-500 whitespace-nowrap">{cell || "—"}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : !budgetLoading ? (
+                      <p className="text-cream-500 text-xs px-4 py-3">No budget data found for this job.</p>
+                    ) : null}
+                  </div>
+                )}
+
+                {/* ── Transaction Lines ── */}
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <label className={`${labelClass} mb-0`}>Transaction Lines</label>
                     <button type="button" onClick={addRow} className={addBtnClass}>+ Add Line</button>
                   </div>
-
                   <div className="space-y-3">
                     {rows.map((row, i) => (
                       <div key={i} className="bg-white border border-cream-300 p-4">
@@ -473,8 +582,6 @@ export default function BudgetManager() {
                 {/* ── New Lead ── */}
                 {crmSubTab === "new-lead" && (
                   <form onSubmit={submitNewLead} className="space-y-5">
-
-                    {/* Lead ID preview */}
                     <div className="flex items-center gap-3 bg-navy-500/10 border border-navy-300/30 px-4 py-3">
                       <span className="text-navy-400 text-xs tracking-widest uppercase">Lead ID</span>
                       <span className="text-navy-500 font-semibold text-sm font-mono">{previewLeadId}</span>
@@ -483,18 +590,12 @@ export default function BudgetManager() {
 
                     {editableCrmCols.length === 0 ? (
                       <p className="text-cream-500 text-sm py-4">
-                        No CRM columns found. Make sure the &ldquo;Pipedrive CRM&rdquo; sheet exists and your Apps Script is fully updated and redeployed.
+                        No CRM columns found. Make sure the &ldquo;Pipedrive CRM&rdquo; sheet exists and your Apps Script is deployed.
                       </p>
                     ) : (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                         {editableCrmCols.map(col => (
-                          <CrmField
-                            key={col}
-                            col={col}
-                            value={crmForm[col] || ""}
-                            onChange={updateCrmField}
-                            pipelineStages={pipelineStages}
-                          />
+                          <CrmField key={col} col={col} value={crmForm[col] || ""} onChange={updateCrmField} pipelineStages={pipelineStages} />
                         ))}
                       </div>
                     )}
@@ -508,15 +609,17 @@ export default function BudgetManager() {
                 {/* ── Edit Lead ── */}
                 {crmSubTab === "edit-lead" && (
                   <form onSubmit={submitEditLead} className="space-y-5">
-
                     <div>
                       <label className={labelClass}>Select Lead *</label>
+                      <p className="text-cream-500 text-xs mb-2">
+                        Showing {activeLeads.length} active lead{activeLeads.length !== 1 ? "s" : ""} — completed, dead, and lost are hidden.
+                      </p>
                       <select required value={selectedLeadId} onChange={e => handleLeadSelect(e.target.value)} className={inputClass}>
                         <option value="" disabled>Choose a lead…</option>
-                        {crmLeads.map(l => (
+                        {activeLeads.map(l => (
                           <option key={l.leadId} value={l.leadId}>
-                            {l.clientName || l.leadId}
-                            {l.address    ? ` — ${l.address}`    : ""}
+                            {l.clientName  || l.leadId}
+                            {l.address     ? ` — ${l.address}`     : ""}
                             {l.projectDesc ? ` — ${l.projectDesc}` : ""}
                             {` (${l.leadId})`}
                           </option>
@@ -529,25 +632,110 @@ export default function BudgetManager() {
                         <p className="text-cream-500 text-xs tracking-wide">
                           Fields are pre-filled with current values. All fields are optional — only what you change will be saved.
                         </p>
-
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                           {editableCrmCols.map(col => (
-                            <CrmField
-                              key={col}
-                              col={col}
-                              value={crmForm[col] || ""}
-                              onChange={updateCrmField}
-                              pipelineStages={pipelineStages}
-                            />
+                            <CrmField key={col} col={col} value={crmForm[col] || ""} onChange={updateCrmField} pipelineStages={pipelineStages} />
                           ))}
                         </div>
-
                         <button type="submit" disabled={submitting} className={submitClass}>
                           {submitting ? "Saving…" : "Save Changes"}
                         </button>
                       </>
                     )}
                   </form>
+                )}
+              </div>
+            )}
+
+            {/* ════════════════ SUMMARY ════════════════ */}
+            {activeTab === "summary" && (
+              <div className="space-y-6">
+                <h2 className="text-navy-500 text-xl font-semibold" style={{ fontFamily: "var(--font-playfair)" }}>
+                  Job Summary
+                </h2>
+
+                {/* ── Filters ── */}
+                <div className="bg-white border border-cream-300 p-5">
+                  <p className={`${labelClass} mb-4`}>Filter by Sold Date</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-navy-400 text-xs tracking-wider uppercase mb-1">Year</label>
+                      <select value={filterYear}
+                        onChange={e => { setFilterYear(e.target.value); setFilterQuarter("all"); setFilterMonth("all"); }}
+                        className={inputClass}>
+                        <option value="all">All Years</option>
+                        {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-navy-400 text-xs tracking-wider uppercase mb-1">Quarter</label>
+                      <select value={filterQuarter}
+                        onChange={e => { setFilterQuarter(e.target.value); setFilterMonth("all"); }}
+                        className={inputClass}>
+                        <option value="all">All Quarters</option>
+                        {[1,2,3,4].map(q => <option key={q} value={String(q)}>{QUARTER_LABELS[q - 1]}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-navy-400 text-xs tracking-wider uppercase mb-1">Month</label>
+                      <select value={filterMonth} onChange={e => setFilterMonth(e.target.value)} className={inputClass}>
+                        <option value="all">All Months</option>
+                        {MONTH_NAMES.map((m, i) => <option key={i} value={String(i + 1)}>{m}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  {(filterYear !== "all" || filterQuarter !== "all" || filterMonth !== "all") && (
+                    <button
+                      onClick={() => { setFilterYear("all"); setFilterQuarter("all"); setFilterMonth("all"); }}
+                      className="mt-4 text-xs text-tan-600 hover:text-tan-700 tracking-wider uppercase underline">
+                      Clear all filters
+                    </button>
+                  )}
+                </div>
+
+                {/* ── Table ── */}
+                {summaryLoading ? (
+                  <p className="text-navy-400 text-sm animate-pulse text-center py-12">Loading summary data…</p>
+                ) : filteredSummary.length === 0 ? (
+                  <p className="text-cream-500 text-sm text-center py-12">
+                    {summaryData.length === 0 ? "No job data found. Make sure the Apps Script is updated and deployed." : "No jobs match the selected filters."}
+                  </p>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto rounded border border-cream-300">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-navy-500">
+                            <th className="px-4 py-3 text-left text-white tracking-wider uppercase font-medium whitespace-nowrap sticky left-0 bg-navy-500 border-r border-navy-400">
+                              Job
+                            </th>
+                            {SUMMARY_LABELS.map((label, i) => (
+                              <th key={i} className="px-4 py-3 text-left text-white tracking-wider uppercase font-medium whitespace-nowrap border-r border-navy-400 last:border-r-0">
+                                {label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredSummary.map((row, ri) => (
+                            <tr key={ri} className={`border-b border-cream-200 ${ri % 2 === 0 ? "bg-white" : "bg-cream-50"}`}>
+                              <td className="px-4 py-2.5 text-navy-500 font-medium border-r border-cream-200 whitespace-nowrap sticky left-0 bg-inherit">
+                                {row.jobName}
+                              </td>
+                              {SUMMARY_LABELS.map((_, ci) => (
+                                <td key={ci} className="px-4 py-2.5 text-navy-400 border-r border-cream-200 last:border-r-0 whitespace-nowrap">
+                                  {row.values[ci] || "—"}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-cream-500 text-xs text-right">
+                      Showing {filteredSummary.length} of {summaryData.length} job{summaryData.length !== 1 ? "s" : ""}
+                    </p>
+                  </>
                 )}
               </div>
             )}
