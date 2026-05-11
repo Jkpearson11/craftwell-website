@@ -29,6 +29,10 @@ const EXCLUDED_STAGES = ["COMPLETED", "DEAD", "LOST"];
 const QUARTER_LABELS  = ["Q1 (Jan–Mar)", "Q2 (Apr–Jun)", "Q3 (Jul–Sep)", "Q4 (Oct–Dec)"];
 const MONTH_NAMES     = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
+// Pipeline stage positions (1-based) that get IP- prefix (Contract Signed → Project Started).
+// All other stages get CW- prefix.
+const IP_STAGE_POSITIONS = [12, 13, 14];
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 const today       = () => new Date().toISOString().split("T")[0];
 const emptyRow    = (): TxRow      => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
@@ -134,7 +138,11 @@ export default function BudgetManager() {
       const m = l.leadId.match(/(?:CW|IP)-\d{4}(\d{3})/);
       return m ? Math.max(n, parseInt(m[1])) : n;
     }, 0);
-    return `IP-${yy}${mm}${String(max + 1).padStart(3, "0")}`;
+    // Determine prefix based on selected pipeline stage position (1-based)
+    const selectedStage = crmForm["PIPELINE STAGE"] || "";
+    const stagePos      = selectedStage ? pipelineStages.indexOf(selectedStage) + 1 : 0;
+    const prefix        = IP_STAGE_POSITIONS.includes(stagePos) ? "IP" : "CW";
+    return `${prefix}-${yy}${mm}${String(max + 1).padStart(3, "0")}`;
   })();
 
   // Summary filter helpers
