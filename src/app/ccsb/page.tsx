@@ -7,7 +7,7 @@ type CostCode   = { code: string; description: string };
 type TxRow      = { itemCode: string; amount: string; vendor: string; date: string; description: string };
 type BudgetLine = { itemCode: string; budget: string };
 type CrmLead    = { rowIndex: number; leadId: string; clientName: string; address: string; projectDesc: string; data: Record<string, string> };
-type JobBudget  = { headers: string[]; rows: string[][] };
+type JobBudget  = { headers: string[]; rows: string[][]; scopeOfWork?: string };
 type SummaryRow = { jobName: string; values: string[] };
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -25,7 +25,9 @@ const SUMMARY_LABELS = [
   "Current Margin",   // C11
 ];
 const SOLD_DATE_IDX   = 3; // 0-based index into values[] → C5
-const EXCLUDED_STAGES = ["COMPLETED", "DEAD", "LOST"];
+// Substring keywords — stages whose name CONTAINS any of these are hidden from Edit Lead.
+// Handles prefixed stages like "15 - Project Completed" matching "COMPLETED".
+const EXCLUDED_STAGE_KEYWORDS = ["COMPLETED", "DEAD", "LOST"];
 const QUARTER_LABELS  = ["Q1 (Jan–Mar)", "Q2 (Apr–Jun)", "Q3 (Jul–Sep)", "Q4 (Oct–Dec)"];
 const MONTH_NAMES     = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -37,6 +39,29 @@ const IP_STAGE_POSITIONS = [12, 13, 14];
 const today       = () => new Date().toISOString().split("T")[0];
 const emptyRow    = (): TxRow      => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
 const emptyBudget = (): BudgetLine => ({ itemCode: "", budget: "" });
+
+// ── Number formatters ──────────────────────────────────────────────────────
+// Accounting: positives as $1,234.56 — negatives as ($1,234.56)
+function fmtCurrency(val: string | number): string {
+  const n = typeof val === "number" ? val : parseFloat(val);
+  if (isNaN(n)) return String(val) || "—";
+  const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n < 0 ? `($${abs})` : `$${abs}`;
+}
+// Percentage: 20.5%
+function fmtPercent(val: string): string {
+  const n = parseFloat(val);
+  if (isNaN(n)) return val || "—";
+  return n.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
+}
+// Format a summary cell by column index
+const CURRENCY_COLS = [5, 6, 8]; // Contract Value, Operating Budget, Current Spend
+const PERCENT_COLS  = [7, 9];    // Starting Margin, Current Margin
+function fmtSummaryCell(ci: number, val: string): string {
+  if (CURRENCY_COLS.includes(ci)) return fmtCurrency(val);
+  if (PERCENT_COLS.includes(ci))  return fmtPercent(val);
+  return val || "—";
+}
 
 // ── Shared style constants (module-level so they never cause re-mount) ─────
 const inputClass = "w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
@@ -117,10 +142,11 @@ export default function BudgetManager() {
 
   // ── Computed ──────────────────────────────────────────────────────────────
 
-  // Leads still in process — exclude completed/dead/lost from Edit Lead dropdown
+  // Leads still in process — exclude completed/dead/lost from Edit Lead dropdown.
+  // Uses substring match so "15 - Project Completed" is caught by "COMPLETED".
   const activeLeads = crmLeads.filter(l => {
     const stage = (l.data["PIPELINE STAGE"] || "").toUpperCase().trim();
-    return !EXCLUDED_STAGES.includes(stage);
+    return !EXCLUDED_STAGE_KEYWORDS.some(kw => stage.includes(kw));
   });
 
   // CRM columns: drop Lead ID (auto-generated) and any "days to" calculated fields
@@ -481,34 +507,66 @@ export default function BudgetManager() {
                 {/* ── Committed Cost Table ── */}
                 {selectedJob && (
                   <div className="border border-cream-300 bg-white">
-                    <div className="px-4 py-3 border-b border-cream-200 flex items-center justify-between bg-cream-50">
-                      <p className="text-navy-400 text-xs tracking-widest uppercase font-semibold">Committed Cost Budget — {selectedJob}</p>
-                      {budgetLoading && <span className="text-cream-500 text-xs animate-pulse">Loading…</span>}
+                    {/* Title — centered, job name + scope of work */}
+                    <div className="px-4 py-3 border-b border-cream-200 bg-cream-50 text-center relative">
+                      <p className="text-navy-500 text-xs tracking-widest uppercase font-semibold">
+                        Committed Cost Budget — {selectedJob}
+                        {jobBudget?.scopeOfWork ? ` | ${jobBudget.scopeOfWork}` : ""}
+                      </p>
+                      {budgetLoading && (
+                        <span className="absolute right-4 top-1/2 -translate-y-1/2 text-cream-500 text-xs animate-pulse">Loading…</span>
+                      )}
                     </div>
-                    {!budgetLoading && jobBudget && jobBudget.rows.length > 0 ? (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="bg-navy-500/5 border-b border-cream-200">
-                              {jobBudget.headers.map((h, i) => (
-                                <th key={i} className="px-4 py-2 text-left text-navy-400 tracking-wider uppercase font-medium whitespace-nowrap">
-                                  {h || `Col ${i + 1}`}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {jobBudget.rows.map((row, ri) => (
-                              <tr key={ri} className={`border-b border-cream-100 ${ri % 2 === 0 ? "bg-white" : "bg-cream-50"}`}>
-                                {row.map((cell, ci) => (
-                                  <td key={ci} className="px-4 py-2 text-navy-500 whitespace-nowrap">{cell || "—"}</td>
+                    {!budgetLoading && jobBudget && jobBudget.rows.length > 0 ? (() => {
+                      // Column totals (sum numeric columns; col 0 is Category text)
+                      const totals = jobBudget.headers.map((_, ci) => {
+                        if (ci === 0) return "Total";
+                        const sum = jobBudget.rows.reduce((acc, row) => {
+                          const n = parseFloat(row[ci]);
+                          return isNaN(n) ? acc : acc + n;
+                        }, 0);
+                        return fmtCurrency(sum);
+                      });
+                      return (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-navy-500/5 border-b border-cream-200">
+                                {jobBudget.headers.map((h, i) => (
+                                  <th key={i} className={`px-4 py-2 tracking-wider uppercase font-medium whitespace-nowrap ${i === 0 ? "text-left" : "text-right"} text-navy-400`}>
+                                    {h || `Col ${i + 1}`}
+                                  </th>
                                 ))}
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : !budgetLoading ? (
+                            </thead>
+                            <tbody>
+                              {jobBudget.rows.map((row, ri) => (
+                                <tr key={ri} className={`border-b border-cream-100 ${ri % 2 === 0 ? "bg-white" : "bg-cream-50"}`}>
+                                  {row.map((cell, ci) => {
+                                    const isNum = ci > 0 && cell !== "" && !isNaN(parseFloat(cell));
+                                    const display = isNum ? fmtCurrency(cell) : (cell || "—");
+                                    const color   = isNum && parseFloat(cell) < 0 ? "text-red-600" : "text-navy-500";
+                                    return (
+                                      <td key={ci} className={`px-4 py-2 whitespace-nowrap ${ci === 0 ? "text-left" : "text-right"} ${color}`}>
+                                        {display}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                              {/* Totals row */}
+                              <tr className="border-t-2 border-navy-300 bg-navy-500/5 font-semibold">
+                                {totals.map((t, ci) => (
+                                  <td key={ci} className={`px-4 py-2 whitespace-nowrap text-navy-500 ${ci === 0 ? "text-left text-xs tracking-wider uppercase" : "text-right"}`}>
+                                    {t}
+                                  </td>
+                                ))}
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })() : !budgetLoading ? (
                       <p className="text-cream-500 text-xs px-4 py-3">No budget data found for this job.</p>
                     ) : null}
                   </div>
@@ -718,7 +776,7 @@ export default function BudgetManager() {
                               Job
                             </th>
                             {SUMMARY_LABELS.map((label, i) => (
-                              <th key={i} className="px-4 py-3 text-left text-white tracking-wider uppercase font-medium whitespace-nowrap border-r border-navy-400 last:border-r-0">
+                              <th key={i} className={`px-4 py-3 text-white tracking-wider uppercase font-medium whitespace-nowrap border-r border-navy-400 last:border-r-0 ${CURRENCY_COLS.includes(i) || PERCENT_COLS.includes(i) ? "text-right" : "text-left"}`}>
                                 {label}
                               </th>
                             ))}
@@ -730,11 +788,16 @@ export default function BudgetManager() {
                               <td className="px-4 py-2.5 text-navy-500 font-medium border-r border-cream-200 whitespace-nowrap sticky left-0 bg-inherit">
                                 {row.jobName}
                               </td>
-                              {SUMMARY_LABELS.map((_, ci) => (
-                                <td key={ci} className="px-4 py-2.5 text-navy-400 border-r border-cream-200 last:border-r-0 whitespace-nowrap">
-                                  {row.values[ci] || "—"}
-                                </td>
-                              ))}
+                              {SUMMARY_LABELS.map((_, ci) => {
+                                const isNumeric = CURRENCY_COLS.includes(ci) || PERCENT_COLS.includes(ci);
+                                const val = fmtSummaryCell(ci, row.values[ci]);
+                                const isNeg = isNumeric && row.values[ci] && parseFloat(row.values[ci]) < 0;
+                                return (
+                                  <td key={ci} className={`px-4 py-2.5 border-r border-cream-200 last:border-r-0 whitespace-nowrap ${isNumeric ? "text-right" : ""} ${isNeg ? "text-red-600" : "text-navy-400"}`}>
+                                    {val}
+                                  </td>
+                                );
+                              })}
                             </tr>
                           ))}
                         </tbody>
