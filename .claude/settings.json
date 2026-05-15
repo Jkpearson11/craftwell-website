@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "craftwell": {
+      "command": "node",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "craftwell-mcp.ts"
+      ],
+      "cwd": "C:\\Users\\jeron\\Desktop\\Craftwell Website"
+    }
+  }
+}
