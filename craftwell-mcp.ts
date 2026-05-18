@@ -193,6 +193,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+
+    // ── BUDGET LINES ──
+    {
+      name: "add_budget_lines",
+      description:
+        "Add cost-code budget lines to an existing job. " +
+        "Each line sets a budget amount for one cost code in the job's budget table.",
+      inputSchema: {
+        type: "object",
+        required: ["jobName", "budgetLines"],
+        properties: {
+          jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+          budgetLines: {
+            type: "array",
+            description: "Cost-code budget lines to add",
+            items: {
+              type: "object",
+              required: ["itemCode", "budget"],
+              properties: {
+                itemCode: { type: "string", description: "Cost code (e.g. 'Labor - Tile')" },
+                budget:   { type: "number", description: "Budget amount in dollars" },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "get_job_budget",
+      description:
+        "Return the current budget table for a job — shows cost codes, budgeted amounts, " +
+        "actual spend, committed costs, and remaining balance.",
+      inputSchema: {
+        type: "object",
+        required: ["jobName"],
+        properties: {
+          jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+        },
+      },
+    },
   ],
 }));
 
@@ -262,6 +302,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return result.success
           ? ok(`✅ ${result.message}\nLead ID: ${result.leadId}`)
           : err(result.error);
+      }
+
+      // ── add_budget_lines ───────────────────────────────────────────────────
+      case "add_budget_lines": {
+        const { jobName, budgetLines } = args as {
+          jobName: string;
+          budgetLines: Array<{ itemCode: string; budget: number }>;
+        };
+        const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
+        return result.success ? ok(`✅ ${result.message}`) : err(result.error);
+      }
+
+      // ── get_job_budget ─────────────────────────────────────────────────────
+      case "get_job_budget": {
+        const { jobName } = args as { jobName: string };
+        const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(jobName)}`);
+        if (data.error) return err(data.error);
+        const { headers = [], rows = [] } = data;
+        if (!rows.length) return ok(`No budget lines found for "${jobName}".`);
+        const colWidths = headers.map((h: string, i: number) =>
+          Math.max(h.length, ...rows.map((r: string[]) => String(r[i] ?? "").length))
+        );
+        const fmt = (row: string[]) =>
+          row.map((cell, i) => String(cell ?? "").padEnd(colWidths[i])).join("  |  ");
+        const divider = colWidths.map(w => "-".repeat(w)).join("--+--");
+        const lines = [fmt(headers), divider, ...rows.map(fmt)];
+        return ok(`Budget for "${jobName}":\n\n${lines.join("\n")}`);
       }
 
       // ── update_lead ────────────────────────────────────────────────────────
