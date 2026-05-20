@@ -65,11 +65,20 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text: `❌ ${text}` }], isError: true };
 }
 
+// ── Budget warning type ───────────────────────────────────────────────────────
+
+interface BudgetWarning {
+  itemCode: string;
+  budgeted: number;
+  actual: number;
+  overBy: number;
+}
+
 // ── Build MCP server (stateless — new instance per request is fine) ────────
 
 function buildServer() {
   const server = new Server(
-    { name: "craftwell", version: "1.0.0" },
+    { name: "craftwell", version: "1.1.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -77,6 +86,7 @@ function buildServer() {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      // ── READ ──────────────────────────────────────────────────────────────
       {
         name: "list_jobs",
         description: "List all job names in the Craftwell Budget spreadsheet.",
@@ -84,7 +94,7 @@ function buildServer() {
       },
       {
         name: "list_cost_codes",
-        description: "List all available cost codes from the Cost Codes sheet.",
+        description: "List all available cost codes / item codes from the Cost Codes sheet.",
         inputSchema: { type: "object", properties: {} },
       },
       {
@@ -93,27 +103,113 @@ function buildServer() {
         inputSchema: { type: "object", properties: {} },
       },
       {
+        name: "get_job_budget",
+        description: "Return the current budget table for a job — cost codes, budgeted amounts, sub/vendor bids, actuals, and remaining balance. Always check this before entering transactions.",
+        inputSchema: {
+          type: "object",
+          required: ["jobName"],
+          properties: {
+            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+          },
+        },
+      },
+
+      // ── CRM ───────────────────────────────────────────────────────────────
+      {
+        name: "create_lead",
+        description: "Create a new CRM lead. Lead ID is auto-generated (CW- or IP- prefix based on pipeline stage).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fields: {
+              type: "object",
+              description: "Column header → value pairs. Use exact column names from the CRM sheet (e.g. {'CLIENT NAME': 'John Smith', 'PIPELINE STAGE': '1 - New Lead', 'PHONE': '817-555-0100', 'ADDRESS': '123 Main St', 'CITY': 'Dallas', 'PROJECT DESCRIPTION': 'Kitchen remodel', 'LEAD SOURCE': 'Referral'}). Lead ID is always auto-generated.",
+              additionalProperties: { type: "string" },
+            },
+          },
+        },
+      },
+      {
+        name: "update_lead",
+        description: "Update an existing CRM lead by Lead ID (e.g. 'CW-264009'). Only provided fields change. Use PIPELINE STAGE values like: '1 - New Lead', '3 - Walk Scheduled', '5 - Estimate Delivered', '9 - Closed Won', '10 - Closed Lost', '12 - Contract signed', '15 - Project Completed'. Setting to '9 - Closed Won', '10 - Closed Lost', '11 - Dead', or '12 - Contract signed' will stop the lead from appearing in the active list.",
+        inputSchema: {
+          type: "object",
+          required: ["leadId"],
+          properties: {
+            leadId: { type: "string", description: "Lead ID to update (e.g. 'CW-264009')" },
+            fields: {
+              type: "object",
+              description: "Fields to update. Common updates: {'PIPELINE STAGE': '12 - Contract signed'} to mark sold, {'PIPELINE STAGE': '10 - Closed Lost'} to mark lost, {'DATE ESTIMATE DELIVERED': '2026-05-20', 'PIPELINE STAGE': '5 - Estimate Delivered'} after sending estimate, {'DATE SITE WALK SCHEDULED': '2026-05-22', 'PIPELINE STAGE': '3 - Walk Scheduled'} when walk is booked.",
+              additionalProperties: { type: "string" },
+            },
+          },
+        },
+      },
+
+      // ── CALENDAR ──────────────────────────────────────────────────────────
+      {
+        name: "create_calendar_event",
+        description: "Create a Google Calendar event in the Craftwell Projects calendar. Use for site walks, pre-construction meetings, and project milestones.",
+        inputSchema: {
+          type: "object",
+          required: ["title", "date"],
+          properties: {
+            title:           { type: "string",  description: "Event title (e.g. 'Site Walk – John Smith – 123 Main St')" },
+            date:            { type: "string",  description: "Date as YYYY-MM-DD" },
+            time:            { type: "string",  description: "Start time in 24-hour format HH:MM (e.g. '09:00'). Omit for all-day event." },
+            durationMinutes: { type: "number",  description: "Duration in minutes (default: 60)" },
+            description:     { type: "string",  description: "Event notes or description" },
+            location:        { type: "string",  description: "Address or location" },
+          },
+        },
+      },
+
+      // ── BUDGET ────────────────────────────────────────────────────────────
+      {
         name: "create_job",
         description: "Create a new job — copies Template sheet, fills in details, and optionally writes budget allocation.",
         inputSchema: {
           type: "object",
           required: ["jobName", "clientName", "address"],
           properties: {
-            jobName:         { type: "string",  description: "Name for the job tab" },
+            jobName:         { type: "string",  description: "Name for the job tab (e.g. '841 Villa Ridge')" },
             clientName:      { type: "string",  description: "Client full name" },
             address:         { type: "string",  description: "Job site address" },
             scopeOfWork:     { type: "string",  description: "Description of the work" },
             contractValue:   { type: "number",  description: "Contract value in dollars" },
             operatingBudget: { type: "number",  description: "Operating budget in dollars" },
-            startingMargin:  { type: "number",  description: "Starting margin as a percentage" },
+            startingMargin:  { type: "number",  description: "Starting margin as a percentage (e.g. 20 for 20%)" },
             budgetLines: {
               type: "array",
-              description: "Initial cost-code budget allocation",
+              description: "Initial cost-code budget allocation. Leave empty to add budget lines later with add_budget_lines.",
               items: {
                 type: "object",
                 properties: {
-                  itemCode: { type: "string" },
-                  budget:   { type: "number" },
+                  itemCode: { type: "string", description: "Cost code name" },
+                  budget:   { type: "number", description: "Budget amount in dollars" },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "add_budget_lines",
+        description: "Add cost-code budget lines to an existing job's budget table. Use list_cost_codes to see available codes first.",
+        inputSchema: {
+          type: "object",
+          required: ["jobName", "budgetLines"],
+          properties: {
+            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+            budgetLines: {
+              type: "array",
+              description: "Cost-code budget lines to add",
+              items: {
+                type: "object",
+                required: ["itemCode", "budget"],
+                properties: {
+                  itemCode: { type: "string", description: "Cost code (e.g. 'Labor - Tile')" },
+                  budget:   { type: "number", description: "Budget amount in dollars" },
                 },
               },
             },
@@ -122,7 +218,7 @@ function buildServer() {
       },
       {
         name: "add_transactions",
-        description: "Add expense transactions to an existing job. Use negative amounts for credits/returns.",
+        description: "Add expense transactions to an existing job. Use negative amounts for credits/returns. You will be ALERTED (not blocked) if a transaction causes a cost code to go over budget.",
         inputSchema: {
           type: "object",
           required: ["jobName", "transactions"],
@@ -145,67 +241,77 @@ function buildServer() {
           },
         },
       },
+
+      // ── COST CODE MANAGEMENT ──────────────────────────────────────────────
       {
-        name: "create_lead",
-        description: "Create a new CRM lead. Lead ID is auto-generated (CW- or IP- prefix based on pipeline stage).",
+        name: "add_cost_code",
+        description: "Add a new item/cost code to the Cost Codes sheet. Use this when a needed cost code does not exist in the list.",
         inputSchema: {
           type: "object",
+          required: ["code"],
           properties: {
-            fields: {
-              type: "object",
-              description: "Column header → value pairs (e.g. {'CLIENT NAME': 'John Smith', 'PIPELINE STAGE': '1 - New Lead'})",
-              additionalProperties: { type: "string" },
-            },
+            code:        { type: "string", description: "Cost code name (e.g. 'Labor - Plumbing', 'Materials - Lumber')" },
+            category:    { type: "string", description: "Category (e.g. 'Labor', 'Materials', 'Subcontractor', 'Equipment')" },
+            description: { type: "string", description: "Brief description of what this code covers" },
           },
         },
       },
       {
-        name: "update_lead",
-        description: "Update an existing CRM lead by Lead ID (e.g. 'CW-264009'). Only provided fields change.",
+        name: "update_cost_code",
+        description: "Edit an existing cost code in the Cost Codes sheet — rename it, change its category, or update its description.",
         inputSchema: {
           type: "object",
-          required: ["leadId"],
+          required: ["existingCode"],
           properties: {
-            leadId: { type: "string", description: "Lead ID to update" },
-            fields: {
-              type: "object",
-              description: "Fields to update (e.g. {'PIPELINE STAGE': '5 - Estimate Delivered'})",
-              additionalProperties: { type: "string" },
-            },
+            existingCode: { type: "string", description: "Current name of the cost code to edit" },
+            newCode:      { type: "string", description: "New name for the cost code (leave blank to keep current name)" },
+            category:     { type: "string", description: "New category" },
+            description:  { type: "string", description: "New description" },
           },
         },
       },
+
+      // ── SUB BID ───────────────────────────────────────────────────────────
       {
-        name: "add_budget_lines",
-        description: "Add cost-code budget lines to an existing job's budget table.",
+        name: "update_sub_bid",
+        description: "Fill in the vendor/sub bid amount for a cost code on an existing job. Use this when you receive a sub-contractor bid after the initial budget was created.",
         inputSchema: {
           type: "object",
-          required: ["jobName", "budgetLines"],
+          required: ["jobName", "itemCode", "subBidAmount"],
           properties: {
-            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
-            budgetLines: {
-              type: "array",
-              description: "Cost-code budget lines to add",
-              items: {
-                type: "object",
-                required: ["itemCode", "budget"],
-                properties: {
-                  itemCode: { type: "string", description: "Cost code (e.g. 'Labor - Tile')" },
-                  budget:   { type: "number", description: "Budget amount in dollars" },
-                },
-              },
-            },
+            jobName:      { type: "string", description: "Exact job name" },
+            itemCode:     { type: "string", description: "Cost code to update (e.g. 'Subcontractor - HVAC')" },
+            subBidAmount: { type: "number", description: "Vendor/sub bid amount in dollars" },
+            vendorName:   { type: "string", description: "Vendor or sub-contractor name" },
           },
         },
       },
+
+      // ── JOB LIFECYCLE ─────────────────────────────────────────────────────
       {
-        name: "get_job_budget",
-        description: "Return the current budget table for a job — cost codes, budgeted amounts, actuals, and remaining balance.",
+        name: "mark_job_complete",
+        description: "Mark a job as completed in the budget sheet summary section. Use when the project is finished.",
         inputSchema: {
           type: "object",
           required: ["jobName"],
           properties: {
-            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+            jobName:        { type: "string", description: "Exact job name" },
+            completionDate: { type: "string", description: "Completion date as YYYY-MM-DD (defaults to today)" },
+            notes:          { type: "string", description: "Any completion notes" },
+          },
+        },
+      },
+      {
+        name: "add_profit_draw",
+        description: "Record a profit draw taken from a job before project close. IMPORTANT: Always record draws so you know your true remaining profit at final accounting.",
+        inputSchema: {
+          type: "object",
+          required: ["jobName", "amount"],
+          properties: {
+            jobName:     { type: "string", description: "Exact job name" },
+            amount:      { type: "number", description: "Draw amount in dollars (positive number)" },
+            date:        { type: "string", description: "Date as YYYY-MM-DD (defaults to today)" },
+            description: { type: "string", description: "Reason or description for the draw (e.g. 'Personal draw - covering expenses')" },
           },
         },
       },
@@ -219,6 +325,8 @@ function buildServer() {
 
     try {
       switch (name) {
+
+        // ── READ ──────────────────────────────────────────────────────────────
 
         case "list_jobs": {
           const data = await budgetGet("getDropdownData");
@@ -246,39 +354,6 @@ function buildServer() {
           return ok(`${active.length} active leads:\n\n${lines.join("\n")}`);
         }
 
-        case "create_job": {
-          const result = await budgetPost("createJob", args as Record<string, unknown>);
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
-        }
-
-        case "add_transactions": {
-          const { jobName, transactions } = args as {
-            jobName: string;
-            transactions: Array<Record<string, unknown>>;
-          };
-          const today = new Date().toISOString().split("T")[0];
-          const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
-          const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
-        }
-
-        case "create_lead": {
-          const { fields = {} } = args as { fields?: Record<string, string> };
-          const result = await crmPost("addLead", { fields });
-          return result.success
-            ? ok(`✅ ${result.message}\nLead ID: ${result.leadId}`)
-            : fail(result.error);
-        }
-
-        case "add_budget_lines": {
-          const { jobName, budgetLines } = args as {
-            jobName: string;
-            budgetLines: Array<{ itemCode: string; budget: number }>;
-          };
-          const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
-        }
-
         case "get_job_budget": {
           const { jobName } = args as { jobName: string };
           const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(jobName)}`);
@@ -295,6 +370,16 @@ function buildServer() {
           return ok(`Budget for "${jobName}":\n\n${lines.join("\n")}`);
         }
 
+        // ── CRM ───────────────────────────────────────────────────────────────
+
+        case "create_lead": {
+          const { fields = {} } = args as { fields?: Record<string, string> };
+          const result = await crmPost("addLead", { fields });
+          return result.success
+            ? ok(`✅ ${result.message}\nLead ID: ${result.leadId}`)
+            : fail(result.error);
+        }
+
         case "update_lead": {
           const { leadId, fields = {} } = args as { leadId: string; fields?: Record<string, string> };
           const data = await crmGet("getCrmData");
@@ -307,6 +392,139 @@ function buildServer() {
           }
           const result = await crmPost("updateLead", { rowIndex: lead.rowIndex, fields });
           return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+        }
+
+        // ── CALENDAR ──────────────────────────────────────────────────────────
+
+        case "create_calendar_event": {
+          const { title, date, time, durationMinutes = 60, description, location } = args as {
+            title: string;
+            date: string;
+            time?: string;
+            durationMinutes?: number;
+            description?: string;
+            location?: string;
+          };
+          const result = await budgetPost("createCalendarEvent", {
+            title, date, time, durationMinutes, description, location,
+          });
+          return result.success
+            ? ok(`✅ Calendar event created: "${title}" on ${date}${time ? ` at ${time}` : ""}\n${result.eventUrl ? `Event link: ${result.eventUrl}` : ""}`)
+            : fail(result.error);
+        }
+
+        // ── BUDGET ────────────────────────────────────────────────────────────
+
+        case "create_job": {
+          const result = await budgetPost("createJob", args as Record<string, unknown>);
+          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+        }
+
+        case "add_budget_lines": {
+          const { jobName, budgetLines } = args as {
+            jobName: string;
+            budgetLines: Array<{ itemCode: string; budget: number }>;
+          };
+          const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
+          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+        }
+
+        case "add_transactions": {
+          const { jobName, transactions } = args as {
+            jobName: string;
+            transactions: Array<Record<string, unknown>>;
+          };
+          const today = new Date().toISOString().split("T")[0];
+          const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
+          const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
+          if (!result.success) return fail(result.error);
+
+          let msg = `✅ ${result.message}`;
+
+          // Over-budget alert — not a blocker, just a warning
+          const warnings: BudgetWarning[] = result.budgetWarnings ?? [];
+          if (warnings.length > 0) {
+            msg += "\n\n⚠️  OVER-BUDGET ALERT — The following cost codes have exceeded their budget:";
+            for (const w of warnings) {
+              msg += `\n  • ${w.itemCode}: budgeted $${w.budgeted.toFixed(2)}, actual $${w.actual.toFixed(2)} — OVER by $${w.overBy.toFixed(2)}`;
+            }
+            msg += "\n\nTransactions were recorded. Please review the budget.";
+          }
+          return ok(msg);
+        }
+
+        // ── COST CODE MANAGEMENT ──────────────────────────────────────────────
+
+        case "add_cost_code": {
+          const { code, category, description } = args as {
+            code: string;
+            category?: string;
+            description?: string;
+          };
+          const result = await budgetPost("addCostCode", { code, category, description });
+          return result.success ? ok(`✅ Cost code "${code}" added successfully.`) : fail(result.error);
+        }
+
+        case "update_cost_code": {
+          const { existingCode, newCode, category, description } = args as {
+            existingCode: string;
+            newCode?: string;
+            category?: string;
+            description?: string;
+          };
+          const result = await budgetPost("updateCostCode", { existingCode, newCode, category, description });
+          return result.success
+            ? ok(`✅ Cost code updated: "${existingCode}"${newCode ? ` → "${newCode}"` : ""}.`)
+            : fail(result.error);
+        }
+
+        // ── SUB BID ───────────────────────────────────────────────────────────
+
+        case "update_sub_bid": {
+          const { jobName, itemCode, subBidAmount, vendorName } = args as {
+            jobName: string;
+            itemCode: string;
+            subBidAmount: number;
+            vendorName?: string;
+          };
+          const result = await budgetPost("updateSubBid", { jobName, itemCode, subBidAmount, vendorName });
+          return result.success
+            ? ok(`✅ Sub bid updated for "${itemCode}" on "${jobName}": $${subBidAmount.toFixed(2)}${vendorName ? ` (${vendorName})` : ""}.`)
+            : fail(result.error);
+        }
+
+        // ── JOB LIFECYCLE ─────────────────────────────────────────────────────
+
+        case "mark_job_complete": {
+          const { jobName, completionDate, notes } = args as {
+            jobName: string;
+            completionDate?: string;
+            notes?: string;
+          };
+          const date = completionDate ?? new Date().toISOString().split("T")[0];
+          const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
+          return result.success
+            ? ok(`✅ Job "${jobName}" marked as completed on ${date}.`)
+            : fail(result.error);
+        }
+
+        case "add_profit_draw": {
+          const { jobName, amount, date, description } = args as {
+            jobName: string;
+            amount: number;
+            date?: string;
+            description?: string;
+          };
+          const drawDate = date ?? new Date().toISOString().split("T")[0];
+          const result = await budgetPost("addProfitDraw", {
+            jobName,
+            amount,
+            date: drawDate,
+            description: description ?? "Profit draw",
+          });
+          return result.success
+            ? ok(`✅ Profit draw of $${amount.toFixed(2)} recorded for "${jobName}" on ${drawDate}.`)
+            : fail(result.error);
         }
 
         default:
