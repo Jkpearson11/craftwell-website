@@ -173,6 +173,18 @@ function buildServer() {
           },
         },
       },
+      {
+        name: "get_job_transactions",
+        description: "List all expense transactions recorded on a job — date, cost code, vendor, amount, and description. Optionally filter to a single cost code.",
+        inputSchema: {
+          type: "object",
+          required: ["jobName"],
+          properties: {
+            jobName:  { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+            itemCode: { type: "string", description: "Filter to a specific cost code (optional)" },
+          },
+        },
+      },
 
       // ── CRM ───────────────────────────────────────────────────────────────
       {
@@ -429,6 +441,31 @@ function buildServer() {
           const divider = colWidths.map((w: number) => "-".repeat(w)).join("--+--");
           const lines = [fmt(headers as string[]), divider, ...(rows as string[][]).map(fmt)];
           return ok(`Budget for "${jobName}":\n\n${lines.join("\n")}`);
+        }
+
+        case "get_job_transactions": {
+          const { jobName, itemCode } = args as { jobName: string; itemCode?: string };
+          let action = `getJobTransactions&jobName=${encodeURIComponent(jobName)}`;
+          if (itemCode) action += `&itemCode=${encodeURIComponent(itemCode)}`;
+          const data = await budgetGet(action);
+          if (data.error) return fail(data.error);
+          const { headers = [], rows = [] } = data;
+          if (!rows.length) {
+            return ok(itemCode
+              ? `No transactions found for "${itemCode}" on "${jobName}".`
+              : `No transactions found for "${jobName}".`);
+          }
+          const colWidths = (headers as string[]).map((h: string, i: number) =>
+            Math.max(h.length, ...(rows as string[][]).map((r: string[]) => String(r[i] ?? "").length))
+          );
+          const fmt = (row: string[]) =>
+            row.map((cell, i) => String(cell ?? "").padEnd(colWidths[i])).join("  |  ");
+          const divider = colWidths.map((w: number) => "-".repeat(w)).join("--+--");
+          const lines = [fmt(headers as string[]), divider, ...(rows as string[][]).map(fmt)];
+          const title = itemCode
+            ? `Transactions for "${itemCode}" on "${jobName}" (${(rows as string[][]).length} rows):`
+            : `Transactions for "${jobName}" (${(rows as string[][]).length} rows):`;
+          return ok(`${title}\n\n${lines.join("\n")}`);
         }
 
         // ── CRM ───────────────────────────────────────────────────────────────
