@@ -419,13 +419,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (data.error) return err(data.error);
         const { headers = [], rows = [] } = data;
         if (!rows.length) return ok(`No budget lines found for "${jobName}".`);
-        const colWidths = headers.map((h: string, i: number) =>
-          Math.max(h.length, ...rows.map((r: string[]) => String(r[i] ?? "").length))
+        const colWidths = (headers as string[]).map((h: string, i: number) =>
+          Math.max(h.length, ...(rows as string[][]).map((r: string[]) => String(r[i] ?? "").length))
         );
         const fmt = (row: string[]) =>
           row.map((cell, i) => String(cell ?? "").padEnd(colWidths[i])).join("  |  ");
         const divider = colWidths.map((w: number) => "-".repeat(w)).join("--+--");
-        const lines = [fmt(headers), divider, ...rows.map(fmt)];
+        const lines = [fmt(headers as string[]), divider, ...(rows as string[][]).map(fmt)];
         return ok(`Budget for "${jobName}":\n\n${lines.join("\n")}`);
       }
 
