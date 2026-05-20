@@ -26,7 +26,9 @@ const CRM_URL    = process.env.CRM_SCRIPT_URL  ?? "";
 
 async function budgetGet(action: string) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
-  const res = await fetch(`${BUDGET_URL}?action=${action}`);
+  const res = await fetch(`${BUDGET_URL}?action=${action}`, {
+    signal: AbortSignal.timeout(20_000),
+  });
   return res.json();
 }
 
@@ -36,13 +38,16 @@ async function budgetPost(action: string, body: Record<string, unknown>) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...body }),
+    signal: AbortSignal.timeout(55_000),
   });
   return res.json();
 }
 
 async function crmGet(action: string) {
   if (!CRM_URL) throw new Error("CRM_SCRIPT_URL is not configured.");
-  const res = await fetch(`${CRM_URL}?action=${action}`);
+  const res = await fetch(`${CRM_URL}?action=${action}`, {
+    signal: AbortSignal.timeout(20_000),
+  });
   return res.json();
 }
 
@@ -52,6 +57,7 @@ async function crmPost(action: string, body: Record<string, unknown>) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...body }),
+    signal: AbortSignal.timeout(20_000),
   });
   return res.json();
 }
@@ -591,6 +597,17 @@ function buildServer() {
           return fail(`Unknown tool: ${name}`);
       }
     } catch (e) {
+      if (e instanceof Error && e.name === "TimeoutError") {
+        if (name === "create_job") {
+          return ok(
+            "⏳ Job creation is taking longer than expected (Google Sheets template copy can exceed 60s). " +
+            "Check your spreadsheet — the job tab may already be there. If not, wait 30 seconds and retry."
+          );
+        }
+        return fail(
+          "Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again."
+        );
+      }
       return fail(e instanceof Error ? e.message : String(e));
     }
   });
