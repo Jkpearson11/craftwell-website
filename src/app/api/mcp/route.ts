@@ -66,7 +66,7 @@ function fail(text: string) {
 }
 
 // ── Fuzzy job name resolver ───────────────────────────────────────────────────
-// Accepts partial addresses like "11302 Goddard" and resolves to the real name.
+// Accepts partial addresses (e.g. "11302 Goddard") and resolves to the exact name.
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
