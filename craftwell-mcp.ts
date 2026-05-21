@@ -326,7 +326,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
         const fmt = (row: string[]) =>
           row.map((cell, i) => String(cell ?? "").padEnd(colWidths[i])).join("  |  ");
-        const divider = colWidths.map(w => "-".repeat(w)).join("--+--");
+        const divider = colWidths.map((w: number) => "-".repeat(w)).join("--+--");
         const lines = [fmt(headers), divider, ...rows.map(fmt)];
         return ok(`Budget for "${jobName}":\n\n${lines.join("\n")}`);
       }

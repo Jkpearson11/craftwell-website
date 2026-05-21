@@ -65,6 +65,60 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text: `❌ ${text}` }], isError: true };
 }
 
+// ── Fuzzy job name resolver ───────────────────────────────────────────────────
+// Accepts partial addresses (e.g. "11302 Goddard") and resolves to the exact name.
+
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+async function resolveJobName(input: string): Promise<string> {
+  const data = await budgetGet("getDropdownData");
+  const jobs: string[] = data.jobs ?? [];
+  if (!jobs.length) throw new Error("No jobs found in spreadsheet.");
+
+  // 1. Exact match — fast path
+  if (jobs.includes(input)) return input;
+
+  // 2. Case-insensitive exact
+  const lower = input.toLowerCase();
+  const ci = jobs.find(j => j.toLowerCase() === lower);
+  if (ci) return ci;
+
+  // 3. Normalized exact (strips punctuation/extra spaces)
+  const normIn = normalize(input);
+  const norm = jobs.find(j => normalize(j) === normIn);
+  if (norm) return norm;
+
+  // 4. Input is a substring of job name ("11302 Goddard" ⊂ "11302 Goddard CT")
+  const sub = jobs.filter(j => j.toLowerCase().includes(lower));
+
+  // 5. Job name is a substring of input (user typed extra words)
+  const rev = jobs.filter(j => lower.includes(j.toLowerCase()));
+
+  // 6. All significant words in input appear somewhere in the job name
+  const words = normIn.split(" ").filter(w => w.length > 1);
+  const wordMatch = jobs.filter(j => {
+    const nj = normalize(j);
+    return words.every(w => nj.includes(w));
+  });
+
+  // Deduplicate candidates across strategies
+  const candidates = [...new Set([...sub, ...rev, ...wordMatch])];
+
+  if (candidates.length === 1) return candidates[0];
+
+  if (candidates.length > 1) {
+    const list = candidates.slice(0, 6).join(", ");
+    throw new Error(`"${input}" matches multiple jobs: ${list}. Please be more specific.`);
+  }
+
+  // No match — provide helpful suggestions using partial word overlap
+  const anyWord = jobs.filter(j => words.some(w => normalize(j).includes(w))).slice(0, 5);
+  const hint = anyWord.length ? ` Similar jobs: ${anyWord.join(", ")}` : ` Available jobs: ${jobs.slice(0, 8).join(", ")}`;
+  throw new Error(`Job "${input}" not found.${hint}`);
+}
+
 // ── Budget warning type ───────────────────────────────────────────────────────
 
 interface BudgetWarning {
@@ -109,7 +163,7 @@ function buildServer() {
           type: "object",
           required: ["jobName"],
           properties: {
-            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+            jobName: { type: "string", description: "Job name or partial address — the system will find the best match (e.g. '11302 Goddard' will match '11302 Goddard CT')" },
           },
         },
       },
@@ -172,7 +226,7 @@ function buildServer() {
           type: "object",
           required: ["jobName", "clientName", "address"],
           properties: {
-            jobName:         { type: "string",  description: "Name for the job tab (e.g. '841 Villa Ridge')" },
+            jobName:         { type: "string",  description: "Name for the job tab (e.g. '841 Villa Ridge'). For multiple projects at the same address use 'Address - Room' format, e.g. '7343 Edgerton - Kitchen' and '7343 Edgerton - Master Bath'." },
             clientName:      { type: "string",  description: "Client full name" },
             address:         { type: "string",  description: "Job site address" },
             scopeOfWork:     { type: "string",  description: "Description of the work" },
@@ -200,7 +254,7 @@ function buildServer() {
           type: "object",
           required: ["jobName", "budgetLines"],
           properties: {
-            jobName: { type: "string", description: "Exact job name as it appears in the spreadsheet" },
+            jobName: { type: "string", description: "Job name or partial address — partial match is OK" },
             budgetLines: {
               type: "array",
               description: "Cost-code budget lines to add",
@@ -223,7 +277,7 @@ function buildServer() {
           type: "object",
           required: ["jobName", "transactions"],
           properties: {
-            jobName: { type: "string", description: "Exact job name" },
+            jobName: { type: "string", description: "Job name or partial address — partial match is OK" },
             transactions: {
               type: "array",
               items: {
@@ -279,7 +333,7 @@ function buildServer() {
           type: "object",
           required: ["jobName", "itemCode", "subBidAmount"],
           properties: {
-            jobName:      { type: "string", description: "Exact job name" },
+            jobName:      { type: "string", description: "Job name or partial address — partial match is OK" },
             itemCode:     { type: "string", description: "Cost code to update (e.g. 'Subcontractor - HVAC')" },
             subBidAmount: { type: "number", description: "Vendor/sub bid amount in dollars" },
             vendorName:   { type: "string", description: "Vendor or sub-contractor name" },
@@ -295,7 +349,7 @@ function buildServer() {
           type: "object",
           required: ["jobName"],
           properties: {
-            jobName:        { type: "string", description: "Exact job name" },
+            jobName:        { type: "string", description: "Job name or partial address — partial match is OK" },
             completionDate: { type: "string", description: "Completion date as YYYY-MM-DD (defaults to today)" },
             notes:          { type: "string", description: "Any completion notes" },
           },
@@ -308,7 +362,7 @@ function buildServer() {
           type: "object",
           required: ["jobName", "amount"],
           properties: {
-            jobName:     { type: "string", description: "Exact job name" },
+            jobName:     { type: "string", description: "Job name or partial address — partial match is OK" },
             amount:      { type: "number", description: "Draw amount in dollars (positive number)" },
             date:        { type: "string", description: "Date as YYYY-MM-DD (defaults to today)" },
             description: { type: "string", description: "Reason or description for the draw (e.g. 'Personal draw - covering expenses')" },
@@ -355,7 +409,8 @@ function buildServer() {
         }
 
         case "get_job_budget": {
-          const { jobName } = args as { jobName: string };
+          const { jobName: jobInput } = args as { jobName: string };
+          const jobName = await resolveJobName(jobInput);
           const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(jobName)}`);
           if (data.error) return fail(data.error);
           const { headers = [], rows = [] } = data;
@@ -421,19 +476,21 @@ function buildServer() {
         }
 
         case "add_budget_lines": {
-          const { jobName, budgetLines } = args as {
+          const { jobName: jobInput, budgetLines } = args as {
             jobName: string;
             budgetLines: Array<{ itemCode: string; budget: number }>;
           };
+          const jobName = await resolveJobName(jobInput);
           const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
           return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
         }
 
         case "add_transactions": {
-          const { jobName, transactions } = args as {
+          const { jobName: jobInput, transactions } = args as {
             jobName: string;
             transactions: Array<Record<string, unknown>>;
           };
+          const jobName = await resolveJobName(jobInput);
           const today = new Date().toISOString().split("T")[0];
           const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
           const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
@@ -481,12 +538,13 @@ function buildServer() {
         // ── SUB BID ───────────────────────────────────────────────────────────
 
         case "update_sub_bid": {
-          const { jobName, itemCode, subBidAmount, vendorName } = args as {
+          const { jobName: jobInput, itemCode, subBidAmount, vendorName } = args as {
             jobName: string;
             itemCode: string;
             subBidAmount: number;
             vendorName?: string;
           };
+          const jobName = await resolveJobName(jobInput);
           const result = await budgetPost("updateSubBid", { jobName, itemCode, subBidAmount, vendorName });
           return result.success
             ? ok(`✅ Sub bid updated for "${itemCode}" on "${jobName}": $${subBidAmount.toFixed(2)}${vendorName ? ` (${vendorName})` : ""}.`)
@@ -496,11 +554,12 @@ function buildServer() {
         // ── JOB LIFECYCLE ─────────────────────────────────────────────────────
 
         case "mark_job_complete": {
-          const { jobName, completionDate, notes } = args as {
+          const { jobName: jobInput, completionDate, notes } = args as {
             jobName: string;
             completionDate?: string;
             notes?: string;
           };
+          const jobName = await resolveJobName(jobInput);
           const date = completionDate ?? new Date().toISOString().split("T")[0];
           const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
           return result.success
@@ -509,12 +568,13 @@ function buildServer() {
         }
 
         case "add_profit_draw": {
-          const { jobName, amount, date, description } = args as {
+          const { jobName: jobInput, amount, date, description } = args as {
             jobName: string;
             amount: number;
             date?: string;
             description?: string;
           };
+          const jobName = await resolveJobName(jobInput);
           const drawDate = date ?? new Date().toISOString().split("T")[0];
           const result = await budgetPost("addProfitDraw", {
             jobName,
