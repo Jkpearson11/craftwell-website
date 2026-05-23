@@ -43,9 +43,12 @@ const projectTypes = [
   "Other",
 ];
 
+const SUBMIT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between submissions
+
 export default function Contact() {
   const [form, setForm] = useState({
     name: "", email: "", phone: "", projectType: "", budget: "", message: "",
+    honeypot: "",
   });
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState(false);
@@ -59,6 +62,17 @@ export default function Contact() {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+
+    // Honeypot: bots fill hidden fields, humans don't
+    if (form.honeypot) return;
+
+    // Rate-limit: prevent repeated submissions within the cooldown window
+    const lastSubmit = Number(sessionStorage.getItem("cw_last_submit") ?? 0);
+    if (Date.now() - lastSubmit < SUBMIT_COOLDOWN_MS) {
+      setError(true);
+      return;
+    }
+
     setLoading(true);
     setError(false);
 
@@ -74,6 +88,8 @@ export default function Contact() {
       project_type: form.projectType,
       budget: form.budget || "Not specified",
       message: form.message || "No message provided",
+      // Honeypot field name Web3Forms recognizes for extra server-side filtering
+      botcheck: "",
     };
 
     try {
@@ -84,6 +100,7 @@ export default function Contact() {
       });
       const data = await res.json();
       if (data.success) {
+        sessionStorage.setItem("cw_last_submit", String(Date.now()));
         setSubmitted(true);
       } else {
         setError(true);
@@ -162,13 +179,25 @@ export default function Contact() {
             ) : (
               <form onSubmit={handleSubmit} className="space-y-6">
 
+                {/* Honeypot — hidden from real users, bots fill it in */}
+                <input
+                  type="text"
+                  name="honeypot"
+                  value={form.honeypot}
+                  onChange={handleChange}
+                  tabIndex={-1}
+                  autoComplete="off"
+                  aria-hidden="true"
+                  style={{ display: "none" }}
+                />
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div>
                     <label className="block text-navy-400 text-xs tracking-widest uppercase mb-2">
                       Full Name *
                     </label>
                     <input
-                      type="text" name="name" required
+                      type="text" name="name" required maxLength={100}
                       value={form.name} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
                       placeholder="Jane Smith"
@@ -179,7 +208,7 @@ export default function Contact() {
                       Email Address *
                     </label>
                     <input
-                      type="email" name="email" required
+                      type="email" name="email" required maxLength={254}
                       value={form.email} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
                       placeholder="jane@example.com"
@@ -193,7 +222,7 @@ export default function Contact() {
                       Phone Number
                     </label>
                     <input
-                      type="tel" name="phone"
+                      type="tel" name="phone" maxLength={20}
                       value={form.phone} onChange={handleChange}
                       className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors"
                       placeholder="(817) 555-0100"
@@ -238,7 +267,7 @@ export default function Contact() {
                     Tell Us About Your Project
                   </label>
                   <textarea
-                    name="message" rows={5}
+                    name="message" rows={5} maxLength={2000}
                     value={form.message} onChange={handleChange}
                     className="w-full bg-white border border-cream-300 px-4 py-3 text-navy-500 text-sm placeholder:text-cream-500 focus:outline-none focus:border-tan-400 transition-colors resize-none"
                     placeholder="Describe your project goals, timeline, or any specific questions..."
