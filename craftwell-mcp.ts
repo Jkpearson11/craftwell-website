@@ -20,6 +20,52 @@ import {
 const BUDGET_URL = process.env.APPS_SCRIPT_URL ?? "";
 const CRM_URL    = process.env.CRM_SCRIPT_URL  ?? "";
 
+// ── Startup validation ────────────────────────────────────────────────────────
+
+const APPS_SCRIPT_ORIGIN = "https://script.google.com";
+
+function assertConfig() {
+  const errs: string[] = [];
+  if (!BUDGET_URL) {
+    errs.push("APPS_SCRIPT_URL is not set");
+  } else if (!BUDGET_URL.startsWith(APPS_SCRIPT_ORIGIN)) {
+    errs.push("APPS_SCRIPT_URL must be a Google Apps Script URL (https://script.google.com/…)");
+  }
+  if (!CRM_URL) {
+    errs.push("CRM_SCRIPT_URL is not set");
+  } else if (!CRM_URL.startsWith(APPS_SCRIPT_ORIGIN)) {
+    errs.push("CRM_SCRIPT_URL must be a Google Apps Script URL (https://script.google.com/…)");
+  }
+  if (errs.length) {
+    console.error("craftwell-mcp: configuration errors:\n" + errs.map(e => `  • ${e}`).join("\n"));
+    process.exit(1);
+  }
+}
+
+// ── Input validation helpers ──────────────────────────────────────────────────
+
+const MAX_STR = 500;
+const MAX_MSG = 2000;
+
+function safeStr(v: unknown, max = MAX_STR): string {
+  if (typeof v !== "string") throw new Error("Expected a string value");
+  const s = v.trim();
+  if (s.length === 0) throw new Error("Value must not be empty");
+  if (s.length > max) throw new Error(`Value exceeds maximum length of ${max} characters`);
+  return s;
+}
+
+function safeOptStr(v: unknown, max = MAX_STR): string | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  return safeStr(v, max);
+}
+
+function safeNum(v: unknown): number {
+  const n = typeof v === "string" ? parseFloat(v) : (v as number);
+  if (typeof n !== "number" || !isFinite(n)) throw new Error("Expected a finite number");
+  return n;
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 async function budgetGet(action: string) {
@@ -391,25 +437,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── create_job ─────────────────────────────────────────────────────────
       case "create_job": {
-        const result = await budgetPost("createJob", args as Record<string, unknown>);
+        const raw = args as Record<string, unknown>;
+        const jobName         = safeStr(raw.jobName);
+        const clientName      = safeStr(raw.clientName);
+        const address         = safeStr(raw.address);
+        const scopeOfWork     = safeOptStr(raw.scopeOfWork, MAX_MSG);
+        const contractValue   = raw.contractValue   != null ? safeNum(raw.contractValue)   : undefined;
+        const operatingBudget = raw.operatingBudget != null ? safeNum(raw.operatingBudget) : undefined;
+        const startingMargin  = raw.startingMargin  != null ? safeNum(raw.startingMargin)  : undefined;
+        const budgetLines     = raw.budgetLines as unknown[] | undefined;
+        const result = await budgetPost("createJob", {
+          jobName, clientName, address, scopeOfWork,
+          contractValue, operatingBudget, startingMargin, budgetLines,
+        });
         return result.success ? ok(`✅ ${result.message}`) : err(result.error);
       }
 
       // ── add_transactions ───────────────────────────────────────────────────
       case "add_transactions": {
-        const { jobName, transactions } = args as {
-          jobName: string;
-          transactions: Array<Record<string, unknown>>;
-        };
+        const raw = args as Record<string, unknown>;
+        const jobName = safeStr(raw.jobName);
+        if (!Array.isArray(raw.transactions) || raw.transactions.length === 0)
+          throw new Error("transactions must be a non-empty array");
         const today = new Date().toISOString().split("T")[0];
-        const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
-        const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
+        const transactions = (raw.transactions as Array<Record<string, unknown>>).map(tx => ({
+          date:        safeOptStr(tx.date) ?? today,
+          itemCode:    safeStr(tx.itemCode),
+          amount:      safeNum(tx.amount),
+          vendor:      safeOptStr(tx.vendor),
+          description: safeOptStr(tx.description, MAX_MSG),
+        }));
+        const result = await budgetPost("addTransactions", { jobName, transactions });
         return result.success ? ok(`✅ ${result.message}`) : err(result.error);
       }
 
       // ── create_lead ────────────────────────────────────────────────────────
       case "create_lead": {
-        const { fields = {} } = args as { fields?: Record<string, string> };
+        const raw = args as Record<string, unknown>;
+        const rawFields = (raw.fields ?? {}) as Record<string, unknown>;
+        const fields: Record<string, string> = {};
+        for (const [k, v] of Object.entries(rawFields)) {
+          const key = safeStr(k);
+          fields[key] = safeStr(v, MAX_MSG);
+        }
         const result = await crmPost("addLead", { fields });
         return result.success
           ? ok(`✅ ${result.message}\nLead ID: ${result.leadId}`)
@@ -418,17 +488,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── add_budget_lines ───────────────────────────────────────────────────
       case "add_budget_lines": {
-        const { jobName, budgetLines } = args as {
-          jobName: string;
-          budgetLines: Array<{ itemCode: string; budget: number }>;
-        };
+        const raw = args as Record<string, unknown>;
+        const jobName = safeStr(raw.jobName);
+        if (!Array.isArray(raw.budgetLines) || raw.budgetLines.length === 0)
+          throw new Error("budgetLines must be a non-empty array");
+        const budgetLines = (raw.budgetLines as Array<Record<string, unknown>>).map(bl => ({
+          itemCode: safeStr(bl.itemCode),
+          budget:   safeNum(bl.budget),
+        }));
         const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
         return result.success ? ok(`✅ ${result.message}`) : err(result.error);
       }
 
       // ── get_job_budget ─────────────────────────────────────────────────────
       case "get_job_budget": {
-        const { jobName } = args as { jobName: string };
+        const { jobName } = { jobName: safeStr((args as Record<string, unknown>).jobName) };
         const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(jobName)}`);
         if (data.error) return err(data.error);
         const { headers = [], rows = [] } = data;
@@ -445,7 +519,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── get_job_transactions ───────────────────────────────────────────────
       case "get_job_transactions": {
-        const { jobName, itemCode } = args as { jobName: string; itemCode?: string };
+        const raw = args as Record<string, unknown>;
+        const jobName  = safeStr(raw.jobName);
+        const itemCode = safeOptStr(raw.itemCode);
         let action = `getJobTransactions&jobName=${encodeURIComponent(jobName)}`;
         if (itemCode) action += `&itemCode=${encodeURIComponent(itemCode)}`;
         const data = await budgetGet(action);
@@ -471,15 +547,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── update_lead ────────────────────────────────────────────────────────
       case "update_lead": {
-        const { leadId, fields = {} } = args as { leadId: string; fields?: Record<string, string> };
-        // Resolve leadId → rowIndex by fetching current data
+        const raw    = args as Record<string, unknown>;
+        const leadId = safeStr(raw.leadId);
+        const rawFields = (raw.fields ?? {}) as Record<string, unknown>;
+        const fields: Record<string, string> = {};
+        for (const [k, v] of Object.entries(rawFields)) {
+          fields[safeStr(k)] = safeStr(v, MAX_MSG);
+        }
         const data = await crmGet("getCrmData");
         const lead = (data.crmLeads ?? []).find(
           (l: { leadId: string }) => l.leadId.toUpperCase() === leadId.toUpperCase()
         );
         if (!lead) {
-          const ids = (data.crmLeads ?? []).map((l: { leadId: string }) => l.leadId).join(", ");
-          return err(`Lead "${leadId}" not found. Available IDs: ${ids || "none"}`);
+          return err(`Lead "${leadId}" not found. Use list_crm_leads to see available lead IDs.`);
         }
         const result = await crmPost("updateLead", { rowIndex: lead.rowIndex, fields });
         return result.success ? ok(`✅ ${result.message}`) : err(result.error);
@@ -487,23 +567,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── add_cost_code ──────────────────────────────────────────────────────
       case "add_cost_code": {
-        const { code, category, description } = args as {
-          code: string;
-          category?: string;
-          description?: string;
-        };
+        const raw = args as Record<string, unknown>;
+        const code        = safeStr(raw.code);
+        const category    = safeOptStr(raw.category);
+        const description = safeOptStr(raw.description, MAX_MSG);
         const result = await budgetPost("addCostCode", { code, category, description });
         return result.success ? ok(`✅ Cost code "${code}" added successfully.`) : err(result.error);
       }
 
       // ── update_cost_code ───────────────────────────────────────────────────
       case "update_cost_code": {
-        const { existingCode, newCode, category, description } = args as {
-          existingCode: string;
-          newCode?: string;
-          category?: string;
-          description?: string;
-        };
+        const raw = args as Record<string, unknown>;
+        const existingCode = safeStr(raw.existingCode);
+        const newCode      = safeOptStr(raw.newCode);
+        const category     = safeOptStr(raw.category);
+        const description  = safeOptStr(raw.description, MAX_MSG);
         const result = await budgetPost("updateCostCode", { existingCode, newCode, category, description });
         return result.success
           ? ok(`✅ Cost code updated: "${existingCode}"${newCode ? ` → "${newCode}"` : ""}.`)
@@ -512,12 +590,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── update_sub_bid ─────────────────────────────────────────────────────
       case "update_sub_bid": {
-        const { jobName, itemCode, subBidAmount, vendorName } = args as {
-          jobName: string;
-          itemCode: string;
-          subBidAmount: number;
-          vendorName?: string;
-        };
+        const raw = args as Record<string, unknown>;
+        const jobName      = safeStr(raw.jobName);
+        const itemCode     = safeStr(raw.itemCode);
+        const subBidAmount = safeNum(raw.subBidAmount);
+        const vendorName   = safeOptStr(raw.vendorName);
         const result = await budgetPost("updateSubBid", { jobName, itemCode, subBidAmount, vendorName });
         return result.success
           ? ok(`✅ Sub bid updated for "${itemCode}" on "${jobName}": $${subBidAmount.toFixed(2)}${vendorName ? ` (${vendorName})` : ""}.`)
@@ -526,12 +603,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── mark_job_complete ──────────────────────────────────────────────────
       case "mark_job_complete": {
-        const { jobName, completionDate, notes } = args as {
-          jobName: string;
-          completionDate?: string;
-          notes?: string;
-        };
-        const date = completionDate ?? new Date().toISOString().split("T")[0];
+        const raw  = args as Record<string, unknown>;
+        const jobName = safeStr(raw.jobName);
+        const notes   = safeOptStr(raw.notes, MAX_MSG);
+        const date    = safeOptStr(raw.completionDate) ?? new Date().toISOString().split("T")[0];
         const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
         return result.success
           ? ok(`✅ Job "${jobName}" marked as completed on ${date}.`)
@@ -540,18 +615,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── add_profit_draw ────────────────────────────────────────────────────
       case "add_profit_draw": {
-        const { jobName, amount, date, description } = args as {
-          jobName: string;
-          amount: number;
-          date?: string;
-          description?: string;
-        };
-        const drawDate = date ?? new Date().toISOString().split("T")[0];
+        const raw         = args as Record<string, unknown>;
+        const jobName     = safeStr(raw.jobName);
+        const amount      = safeNum(raw.amount);
+        const drawDate    = safeOptStr(raw.date) ?? new Date().toISOString().split("T")[0];
+        const description = safeOptStr(raw.description, MAX_MSG) ?? "Profit draw";
         const result = await budgetPost("addProfitDraw", {
-          jobName,
-          amount,
-          date: drawDate,
-          description: description ?? "Profit draw",
+          jobName, amount, date: drawDate, description,
         });
         return result.success
           ? ok(`✅ Profit draw of $${amount.toFixed(2)} recorded for "${jobName}" on ${drawDate}.`)
@@ -560,14 +630,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── create_calendar_event ──────────────────────────────────────────────
       case "create_calendar_event": {
-        const { title, date, time, durationMinutes = 60, description, location } = args as {
-          title: string;
-          date: string;
-          time?: string;
-          durationMinutes?: number;
-          description?: string;
-          location?: string;
-        };
+        const raw             = args as Record<string, unknown>;
+        const title           = safeStr(raw.title);
+        const date            = safeStr(raw.date);
+        const time            = safeOptStr(raw.time);
+        const durationMinutes = raw.durationMinutes != null ? safeNum(raw.durationMinutes) : 60;
+        const description     = safeOptStr(raw.description, MAX_MSG);
+        const location        = safeOptStr(raw.location);
         const result = await budgetPost("createCalendarEvent", {
           title, date, time, durationMinutes, description, location,
         });
@@ -591,13 +660,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         "Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again."
       );
     }
-    return err(e instanceof Error ? e.message : String(e));
+    // Validation errors (from safeStr / safeNum) have safe, user-friendly messages.
+    // All other errors are logged server-side only to avoid leaking internals.
+    const isValidationError = e instanceof Error && (
+      e.message.startsWith("Expected") ||
+      e.message.startsWith("Value") ||
+      e.message.includes("must be") ||
+      e.message.includes("must not")
+    );
+    if (isValidationError) return err(e.message);
+    console.error(`craftwell-mcp tool error [${name}]:`, e);
+    return err("An internal error occurred. Check the MCP server logs for details.");
   }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  assertConfig();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

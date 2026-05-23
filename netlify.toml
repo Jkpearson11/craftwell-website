@@ -4,3 +4,14 @@
 
 [build.environment]
   NETLIFY_NEXT_PLUGIN_SKIP = "false"
+
+# Security headers for all routes (Next.js headers() also applies, this covers
+# static files served directly by Netlify's CDN before the Next.js runtime)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
