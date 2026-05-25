@@ -290,7 +290,7 @@ function buildServer() {
       },
       {
         name: "add_transactions",
-        description: "Add expense transactions to an existing job. Use negative amounts for credits/returns. You will be ALERTED (not blocked) if a transaction causes a cost code to go over budget.",
+        description: "Add expense transactions to an existing job. Use negative amounts for credits/returns. You will be ALERTED (not blocked) if a transaction causes a cost code to go over budget. IMPORTANT: Before calling this tool, call get_job_transactions to check whether the same transaction (same amount, vendor, date, and cost code) already exists — if it does, do NOT add it again. When reading a receipt with multiple line items, record each line item at its own individual amount, NOT at the receipt total repeated for each item. Never extract a number from a product name or SKU (e.g. '511' from '511 Impregnator Qt') as an amount — only use the actual dollar figures on the receipt.",
         inputSchema: {
           type: "object",
           required: ["jobName", "transactions"],
@@ -346,7 +346,7 @@ function buildServer() {
       // ── SUB BID ───────────────────────────────────────────────────────────
       {
         name: "update_sub_bid",
-        description: "Fill in the vendor/sub bid amount for a cost code on an existing job. Use this when you receive a sub-contractor bid after the initial budget was created.",
+        description: "Fill in the negotiated vendor or sub-contractor bid amount for a cost code on an existing job. ONLY call this when you have received a formal quote or bid from a subcontractor or supplier BEFORE work begins — for example, a plumber quoting $3,500 for rough-in work. NEVER call this when recording store receipts, material purchases, or any expense that should go in add_transactions. subBidAmount must be a dollar figure from a bid or quote — never a product SKU, model number, item count, or any number extracted from a product name (e.g. never use '511' from '511 Impregnator Qt' as a bid amount).",
         inputSchema: {
           type: "object",
           required: ["jobName", "itemCode", "subBidAmount"],
