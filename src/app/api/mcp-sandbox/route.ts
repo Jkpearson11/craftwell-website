@@ -8,7 +8,7 @@
  * Register as a second connector in Claude:
  *   URL: https://craftwellconstruction.com/api/mcp-sandbox
  *
- * Use this connector to test all 17 tools safely before using
+ * Use this connector to test all 16 tools safely before using
  * the live Craftwell Admin connector.
  */
 
