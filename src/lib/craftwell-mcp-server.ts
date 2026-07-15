@@ -134,7 +134,7 @@ async function crmPost(action: string, body: Record<string, unknown>) {
 
 // ── Date helper ───────────────────────────────────────────────────────────────
 
-const todayISO = () => todayISO();
+const todayISO = (): string => new Date().toISOString().split("T")[0];
 
 // ── Tool response helpers ─────────────────────────────────────────────────────
 
@@ -886,9 +886,9 @@ export function buildServer(sandbox: boolean) {
     } catch (e) {
       if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
         if (name === "create_job") {
-          return fail(
+          return ok(
             "⏳ Job creation is taking longer than expected (Google Sheets template copy can exceed 60s). " +
-            "Check your spreadsheet — the job tab may already be there. If not, wait 30 seconds and retry."
+            "The operation may have already completed — check your spreadsheet to verify the job tab exists before retrying."
           );
         }
         return fail("Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again.");
