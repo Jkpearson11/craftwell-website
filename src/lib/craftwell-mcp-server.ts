@@ -24,7 +24,7 @@ const CRM_URL    = process.env.CRM_SCRIPT_URL  ?? "";
 // ── CORS headers ──────────────────────────────────────────────────────────────
 
 export const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Origin":  "https://claude.ai",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id, Last-Event-Id",
 };
@@ -48,11 +48,17 @@ const SANDBOX_COST_CODES = [
 
 const SANDBOX_LEADS = [
   { leadId: "CW-000001", clientName: "Test Client Alpha", rowIndex: 2,
-    data: { "PIPELINE STAGE": "1 - New Lead",          "CLIENT NAME": "Test Client Alpha" } },
+    data: { "PIPELINE STAGE": "1 - New Lead", "CLIENT NAME": "Test Client Alpha",
+            "PHONE": "817-555-0101", "ADDRESS": "1234 Demo Ave, Dallas TX 75201",
+            "PROJECT DESCRIPTION": "Full kitchen remodel — cabinets, counters, tile" } },
   { leadId: "CW-000002", clientName: "Test Client Beta",  rowIndex: 3,
-    data: { "PIPELINE STAGE": "3 - Walk Scheduled",    "CLIENT NAME": "Test Client Beta"  } },
+    data: { "PIPELINE STAGE": "3 - Walk Scheduled", "CLIENT NAME": "Test Client Beta",
+            "PHONE": "214-555-0202", "ADDRESS": "5678 Test Blvd, Fort Worth TX 76102",
+            "PROJECT DESCRIPTION": "Master bath remodel — shower, vanity, flooring" } },
   { leadId: "IP-000003", clientName: "Test Client Gamma", rowIndex: 4,
-    data: { "PIPELINE STAGE": "5 - Estimate Delivered","CLIENT NAME": "Test Client Gamma" } },
+    data: { "PIPELINE STAGE": "5 - Estimate Delivered", "CLIENT NAME": "Test Client Gamma",
+            "PHONE": "972-555-0303", "ADDRESS": "9999 Sample Ct, Arlington TX 76010",
+            "PROJECT DESCRIPTION": "Second-story addition — 2 bedrooms and full bath" } },
 ];
 
 const SANDBOX_BUDGET_HEADERS = ["Cost Code", "Budget", "Sub Bid", "Actual", "Committed", "Remaining"];
@@ -61,6 +67,7 @@ const SANDBOX_BUDGET_ROWS = [
   ["Materials - Tile",        "$3,200", "$0",     "$1,850", "$0",     "$1,350"],
   ["Subcontractor - Plumbing","$6,000", "$6,000", "$0",     "$6,000", "$0"   ],
   ["Permits & Fees",          "$1,200", "$0",     "$450",   "$0",     "$750" ],
+  ["Electrical - Rough In",   "$3,200", "$0",     "$4,850", "$0",     "-$1,650"],
 ];
 
 const SANDBOX_TX_HEADERS  = ["Date", "Cost Code", "Vendor", "Amount", "Description"];
@@ -74,6 +81,13 @@ function sandboxOk(text: string) {
   return { content: [{ type: "text" as const, text: text + SANDBOX_BANNER }] };
 }
 
+// ── Formula injection sanitizer ───────────────────────────────────────────────
+
+function sanitizeSheetValue(v: unknown): string {
+  const s = String(v ?? "");
+  return /^[=+\-@]/.test(s) ? "'" + s : s;
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 async function budgetGet(action: string) {
@@ -81,6 +95,7 @@ async function budgetGet(action: string) {
   const res = await fetch(`${BUDGET_URL}?action=${action}`, {
     signal: AbortSignal.timeout(20_000),
   });
+  if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
@@ -92,6 +107,7 @@ async function budgetPost(action: string, body: Record<string, unknown>) {
     body: JSON.stringify({ action, ...body }),
     signal: AbortSignal.timeout(55_000),
   });
+  if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
@@ -100,6 +116,7 @@ async function crmGet(action: string) {
   const res = await fetch(`${CRM_URL}?action=${action}`, {
     signal: AbortSignal.timeout(20_000),
   });
+  if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
@@ -111,8 +128,13 @@ async function crmPost(action: string, body: Record<string, unknown>) {
     body: JSON.stringify({ action, ...body }),
     signal: AbortSignal.timeout(20_000),
   });
+  if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
+
+// ── Date helper ───────────────────────────────────────────────────────────────
+
+const todayISO = (): string => new Date().toISOString().split("T")[0];
 
 // ── Tool response helpers ─────────────────────────────────────────────────────
 
@@ -366,8 +388,9 @@ export function buildServer(sandbox: boolean) {
       {
         name: "add_budget_lines",
         description:
-          "CRAFTWELL (Google Sheets) — Add cost-code budget lines to an existing Craftwell job's " +
-          "budget table. Use list_cost_codes to see available codes first.",
+          "CRAFTWELL (Google Sheets) — Adds rows to the Craftwell Google Sheets budget table — " +
+          "NOT a QuickBooks journal entry or budget. " +
+          "Use list_cost_codes to see available codes first.",
         inputSchema: {
           type: "object",
           required: ["jobName", "budgetLines"],
@@ -462,10 +485,12 @@ export function buildServer(sandbox: boolean) {
       {
         name: "update_sub_bid",
         description:
-          "CRAFTWELL (Google Sheets) — Fill in the negotiated vendor or sub-contractor bid amount for " +
-          "a cost code on an existing Craftwell job. ONLY call this when you have a formal quote or " +
-          "bid BEFORE work begins (e.g. a plumber quoting $3,500 for rough-in work). NEVER call this " +
-          "for store receipts, material purchases, or any expense that should go in add_transactions. " +
+          "CRAFTWELL (Google Sheets) — Updates the sub bid cell in the Craftwell Google Sheets budget " +
+          "— NOT a QuickBooks vendor bill or purchase order. " +
+          "Fill in the negotiated vendor or sub-contractor bid amount for a cost code on an existing " +
+          "Craftwell job. ONLY call this when you have a formal quote or bid BEFORE work begins " +
+          "(e.g. a plumber quoting $3,500 for rough-in work). NEVER call this for store receipts, " +
+          "material purchases, or any expense that should go in add_transactions. " +
           "subBidAmount must be a dollar figure from a bid — never a SKU or product name number.",
         inputSchema: {
           type: "object",
@@ -483,8 +508,8 @@ export function buildServer(sandbox: boolean) {
       {
         name: "mark_job_complete",
         description:
-          "CRAFTWELL (Google Sheets) — Mark a Craftwell construction job as completed in the budget " +
-          "sheet summary section. Use when the project is finished.",
+          "CRAFTWELL (Google Sheets) — Marks the job complete in Google Sheets only — NOT a QuickBooks " +
+          "transaction. Use when the project is finished to update the budget sheet summary section.",
         inputSchema: {
           type: "object",
           required: ["jobName"],
@@ -498,8 +523,10 @@ export function buildServer(sandbox: boolean) {
       {
         name: "add_profit_draw",
         description:
-          "CRAFTWELL (Google Sheets) — Record a profit draw taken from a Craftwell job before project " +
-          "close. IMPORTANT: Always record draws so you know your true remaining profit at final accounting.",
+          "CRAFTWELL (Google Sheets) — Records the draw in Google Sheets — NOT a QuickBooks owner " +
+          "equity withdrawal entry. Use to record a profit draw taken from a Craftwell job before " +
+          "project close. IMPORTANT: Always record draws so you know your true remaining profit at " +
+          "final accounting.",
         inputSchema: {
           type: "object",
           required: ["jobName", "amount"],
@@ -582,7 +609,8 @@ export function buildServer(sandbox: boolean) {
 
         // ── get_job_transactions ─────────────────────────────────────────────
         case "get_job_transactions": {
-          const { jobName, itemCode } = args as { jobName: string; itemCode?: string };
+          const { jobName: jobInput, itemCode } = args as { jobName: string; itemCode?: string };
+          const jobName = await resolveJobName(jobInput, sandbox);
           if (sandbox) {
             const rows = SANDBOX_TX_ROWS.filter(r => !itemCode || r[1] === itemCode);
             if (!rows.length) {
@@ -600,7 +628,7 @@ export function buildServer(sandbox: boolean) {
           let action = `getJobTransactions&jobName=${encodeURIComponent(jobName)}`;
           if (itemCode) action += `&itemCode=${encodeURIComponent(itemCode)}`;
           const data = await budgetGet(action);
-          if (data.error) return fail(data.error);
+          if (data.error) return fail(data.error ?? "Unknown error from Apps Script.");
           const { headers = [], rows = [] } = data;
           if (!rows.length) {
             return ok(itemCode
@@ -621,10 +649,13 @@ export function buildServer(sandbox: boolean) {
             const summary = Object.entries(fields).map(([k, v]) => `  ${k}: ${v}`).join("\n");
             return sandboxOk(`✅ Would create lead ${mockId}:\n\n${summary || "  (no fields provided)"}`);
           }
-          const result = await crmPost("addLead", { fields });
+          const sanitizedFields = Object.fromEntries(
+            Object.entries(fields).map(([k, v]) => [k, sanitizeSheetValue(v)])
+          );
+          const result = await crmPost("addLead", { fields: sanitizedFields });
           return result.success
             ? ok(`✅ ${result.message}\nLead ID: ${result.leadId}`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── update_lead ──────────────────────────────────────────────────────
@@ -646,8 +677,11 @@ export function buildServer(sandbox: boolean) {
             const ids = (data.crmLeads ?? []).map((l: { leadId: string }) => l.leadId).join(", ");
             return fail(`Lead "${leadId}" not found. Available: ${ids || "none"}`);
           }
-          const result = await crmPost("updateLead", { rowIndex: lead.rowIndex, fields });
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+          const sanitizedFields = Object.fromEntries(
+            Object.entries(fields).map(([k, v]) => [k, sanitizeSheetValue(v)])
+          );
+          const result = await crmPost("updateLead", { rowIndex: lead.rowIndex, fields: sanitizedFields });
+          return result.success ? ok(`✅ ${result.message}`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── create_calendar_event ────────────────────────────────────────────
@@ -661,7 +695,8 @@ export function buildServer(sandbox: boolean) {
               `✅ Would create calendar event: "${title}" on ${date}` +
               (time     ? ` at ${time} (${durationMinutes} min)` : " (all-day)") +
               (location ? `\n  Location: ${location}`            : "") +
-              (description ? `\n  Notes: ${description}`         : "")
+              (description ? `\n  Notes: ${description}`         : "") +
+              `\n  Event link: https://calendar.google.com/calendar/r/eventedit/sandbox-mock-event`
             );
           }
           const result = await budgetPost("createCalendarEvent", {
@@ -669,7 +704,7 @@ export function buildServer(sandbox: boolean) {
           });
           return result.success
             ? ok(`✅ Calendar event created: "${title}" on ${date}${time ? ` at ${time}` : ""}\n${result.eventUrl ? `Event link: ${result.eventUrl}` : ""}`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── create_job ───────────────────────────────────────────────────────
@@ -690,7 +725,7 @@ export function buildServer(sandbox: boolean) {
             );
           }
           const result = await budgetPost("createJob", args as Record<string, unknown>);
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+          return result.success ? ok(`✅ ${result.message}`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── add_budget_lines ─────────────────────────────────────────────────
@@ -707,7 +742,7 @@ export function buildServer(sandbox: boolean) {
             );
           }
           const result = await budgetPost("addBudgetLines", { jobName, budgetLines });
-          return result.success ? ok(`✅ ${result.message}`) : fail(result.error);
+          return result.success ? ok(`✅ ${result.message}`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── add_transactions ─────────────────────────────────────────────────
@@ -717,7 +752,7 @@ export function buildServer(sandbox: boolean) {
             transactions: Array<Record<string, unknown>>;
           };
           const jobName = await resolveJobName(jobInput, sandbox);
-          const today   = new Date().toISOString().split("T")[0];
+          const today   = todayISO();
 
           if (sandbox) {
             const txWithDate = transactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
@@ -737,7 +772,7 @@ export function buildServer(sandbox: boolean) {
 
           const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
           const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
-          if (!result.success) return fail(result.error);
+          if (!result.success) return fail(result.error ?? "Unknown error from Apps Script.");
 
           let msg = `✅ ${result.message}`;
           const warnings: BudgetWarning[] = result.budgetWarnings ?? [];
@@ -764,7 +799,7 @@ export function buildServer(sandbox: boolean) {
             );
           }
           const result = await budgetPost("addCostCode", { code, category, description });
-          return result.success ? ok(`✅ Cost code "${code}" added successfully.`) : fail(result.error);
+          return result.success ? ok(`✅ Cost code "${code}" added successfully.`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── update_cost_code ─────────────────────────────────────────────────
@@ -783,7 +818,7 @@ export function buildServer(sandbox: boolean) {
           const result = await budgetPost("updateCostCode", { existingCode, newCode, category, description });
           return result.success
             ? ok(`✅ Cost code updated: "${existingCode}"${newCode ? ` → "${newCode}"` : ""}.`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── update_sub_bid ───────────────────────────────────────────────────
@@ -801,7 +836,7 @@ export function buildServer(sandbox: boolean) {
           const result = await budgetPost("updateSubBid", { jobName, itemCode, subBidAmount, vendorName });
           return result.success
             ? ok(`✅ Sub bid updated for "${itemCode}" on "${jobName}": $${subBidAmount.toFixed(2)}${vendorName ? ` (${vendorName})` : ""}.`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── mark_job_complete ────────────────────────────────────────────────
@@ -810,7 +845,7 @@ export function buildServer(sandbox: boolean) {
             jobName: string; completionDate?: string; notes?: string;
           };
           const jobName = await resolveJobName(jobInput, sandbox);
-          const date    = completionDate ?? new Date().toISOString().split("T")[0];
+          const date    = completionDate ?? todayISO();
           if (sandbox) {
             return sandboxOk(
               `✅ Would mark "${jobName}" as complete on ${date}` +
@@ -820,7 +855,7 @@ export function buildServer(sandbox: boolean) {
           const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
           return result.success
             ? ok(`✅ Job "${jobName}" marked as completed on ${date}.`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         // ── add_profit_draw ──────────────────────────────────────────────────
@@ -829,7 +864,7 @@ export function buildServer(sandbox: boolean) {
             jobName: string; amount: number; date?: string; description?: string;
           };
           const jobName  = await resolveJobName(jobInput, sandbox);
-          const drawDate = date ?? new Date().toISOString().split("T")[0];
+          const drawDate = date ?? todayISO();
           if (sandbox) {
             return sandboxOk(
               `✅ Would record profit draw of $${amount.toFixed(2)} on "${jobName}" on ${drawDate}\n` +
@@ -841,7 +876,7 @@ export function buildServer(sandbox: boolean) {
           });
           return result.success
             ? ok(`✅ Profit draw of $${amount.toFixed(2)} recorded for "${jobName}" on ${drawDate}.`)
-            : fail(result.error);
+            : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
         default:
@@ -849,11 +884,11 @@ export function buildServer(sandbox: boolean) {
       }
 
     } catch (e) {
-      if (e instanceof Error && e.name === "TimeoutError") {
+      if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
         if (name === "create_job") {
           return ok(
             "⏳ Job creation is taking longer than expected (Google Sheets template copy can exceed 60s). " +
-            "Check your spreadsheet — the job tab may already be there. If not, wait 30 seconds and retry."
+            "The operation may have already completed — check your spreadsheet to verify the job tab exists before retrying."
           );
         }
         return fail("Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again.");
@@ -884,10 +919,7 @@ export async function createMcpHandler(req: NextRequest, sandbox: boolean): Prom
 
     return new NextResponse(response.body, { status: response.status, headers });
   } catch (err) {
-    console.error("MCP error:", err);
-    return NextResponse.json(
-      { error: "MCP server error", detail: String(err) },
-      { status: 500, headers: CORS }
-    );
+    console.error("[MCP] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500, headers: CORS });
   }
 }
