@@ -720,11 +720,11 @@ export function buildServer(sandbox: boolean) {
           const today   = new Date().toISOString().split("T")[0];
 
           if (sandbox) {
-            const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
+            const txWithDate = transactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
             const lines = txWithDate.map(tx =>
-              `  ${tx.date}  ${tx.itemCode}  $${Number(tx.amount).toFixed(2)}` +
-              (tx.vendor      ? `  (${tx.vendor})`      : "") +
-              (tx.description ? `  — ${tx.description}` : "")
+              `  ${tx["date"]}  ${tx["itemCode"]}  $${Number(tx["amount"]).toFixed(2)}` +
+              (tx["vendor"]      ? `  (${tx["vendor"]})`      : "") +
+              (tx["description"] ? `  — ${tx["description"]}` : "")
             );
             // Simulate an over-budget warning for testing purposes when amount > 5000
             const bigTx = transactions.find(tx => Number(tx.amount) > 5_000);
