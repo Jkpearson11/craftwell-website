@@ -50,15 +50,18 @@ const SANDBOX_LEADS = [
   { leadId: "CW-000001", clientName: "Test Client Alpha", rowIndex: 2,
     data: { "PIPELINE STAGE": "1 - New Lead", "CLIENT NAME": "Test Client Alpha",
             "PHONE": "817-555-0101", "ADDRESS": "1234 Demo Ave, Dallas TX 75201",
-            "PROJECT DESCRIPTION": "Full kitchen remodel — cabinets, counters, tile" } },
+            "PROJECT DESCRIPTION": "Full kitchen remodel — cabinets, counters, tile",
+            "ESTIMATED VALUE": "28000", "CONTRACT AMOUNT": "" } },
   { leadId: "CW-000002", clientName: "Test Client Beta",  rowIndex: 3,
     data: { "PIPELINE STAGE": "3 - Walk Scheduled", "CLIENT NAME": "Test Client Beta",
             "PHONE": "214-555-0202", "ADDRESS": "5678 Test Blvd, Fort Worth TX 76102",
-            "PROJECT DESCRIPTION": "Master bath remodel — shower, vanity, flooring" } },
+            "PROJECT DESCRIPTION": "Master bath remodel — shower, vanity, flooring",
+            "ESTIMATED VALUE": "15500", "CONTRACT AMOUNT": "" } },
   { leadId: "IP-000003", clientName: "Test Client Gamma", rowIndex: 4,
     data: { "PIPELINE STAGE": "5 - Estimate Delivered", "CLIENT NAME": "Test Client Gamma",
             "PHONE": "972-555-0303", "ADDRESS": "9999 Sample Ct, Arlington TX 76010",
-            "PROJECT DESCRIPTION": "Second-story addition — 2 bedrooms and full bath" } },
+            "PROJECT DESCRIPTION": "Second-story addition — 2 bedrooms and full bath",
+            "ESTIMATED VALUE": "62000", "CONTRACT AMOUNT": "58500" } },
 ];
 
 const SANDBOX_BUDGET_HEADERS = ["Cost Code", "Budget", "Sub Bid", "Actual", "Committed", "Remaining"];
@@ -70,15 +73,33 @@ const SANDBOX_BUDGET_ROWS = [
   ["Electrical - Rough In",   "$3,200", "$0",     "$4,850", "$0",     "-$1,650"],
 ];
 
-const SANDBOX_TX_HEADERS  = ["Date", "Cost Code", "Vendor", "Amount", "Description"];
+const SANDBOX_CONTRACT_VALUES: Record<string, number> = {
+  "SANDBOX - 1234 Demo Ave":  35_000,
+  "SANDBOX - 5678 Test Blvd": 52_000,
+  "SANDBOX - 9999 Sample Ct": 18_500,
+};
+
+const SANDBOX_SUBS = [
+  { subId: "SUB-001", company: "AAA Plumbing LLC",  trade: "Plumbing",   contact: "Mike Torres", phone: "817-555-1001", email: "mike@aaaplumbing.com"  },
+  { subId: "SUB-002", company: "Sparks Electric",    trade: "Electrical", contact: "Dave Chen",   phone: "214-555-2002", email: "dave@sparkselectric.com" },
+  { subId: "SUB-003", company: "Cool Air HVAC",      trade: "HVAC",       contact: "Sarah Kim",   phone: "972-555-3003", email: "sarah@coolair.com"       },
+];
+
+const SANDBOX_TX_HEADERS  = ["Date", "Cost Code", "Vendor", "Amount", "Description", "Attachment"];
 const SANDBOX_TX_ROWS = [
-  ["2026-07-01", "Labor - Tile",    "Joe's Tile Co", "$2,100.00", "Tile labor week 1"],
-  ["2026-07-05", "Materials - Tile","Home Depot",    "$1,850.00", "Porcelain tile 200 sqft"],
-  ["2026-07-08", "Permits & Fees",  "City of Dallas","$450.00",   "Building permit"],
+  ["2026-07-01", "Labor - Tile",    "Joe's Tile Co", "$2,100.00", "Tile labor week 1",        ""],
+  ["2026-07-05", "Materials - Tile","Home Depot",    "$1,850.00", "Porcelain tile 200 sqft",  ""],
+  ["2026-07-08", "Permits & Fees",  "City of Dallas","$450.00",   "Building permit",          "https://receipts.example.com/receipt-001.jpg"],
 ];
 
 function sandboxOk(text: string) {
   return { content: [{ type: "text" as const, text: text + SANDBOX_BANNER }] };
+}
+
+// ── Currency parser ───────────────────────────────────────────────────────────
+
+function parseDollar(s: unknown): number {
+  return parseFloat(String(s ?? "0").replace(/[$,]/g, "")) || 0;
 }
 
 // ── Formula injection sanitizer ───────────────────────────────────────────────
@@ -211,7 +232,7 @@ interface BudgetWarning {
 
 export function buildServer(sandbox: boolean) {
   const server = new Server(
-    { name: "craftwell", version: "1.3.0" },
+    { name: "craftwell", version: "1.4.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -434,11 +455,12 @@ export function buildServer(sandbox: boolean) {
                 type: "object",
                 required: ["itemCode", "amount"],
                 properties: {
-                  itemCode:    { type: "string", description: "Craftwell cost code for this expense" },
-                  amount:      { type: "number", description: "Dollar amount (negative = credit/return)" },
-                  vendor:      { type: "string", description: "Vendor name (e.g. 'Home Depot')" },
-                  date:        { type: "string", description: "YYYY-MM-DD, defaults to today" },
-                  description: { type: "string", description: "Short description of the expense" },
+                  itemCode:      { type: "string", description: "Craftwell cost code for this expense" },
+                  amount:        { type: "number", description: "Dollar amount (negative = credit/return)" },
+                  vendor:        { type: "string", description: "Vendor name (e.g. 'Home Depot')" },
+                  date:          { type: "string", description: "YYYY-MM-DD, defaults to today" },
+                  description:   { type: "string", description: "Short description of the expense" },
+                  attachmentUrl: { type: "string", description: "Optional URL to a receipt photo or document (e.g. from Google Drive or Dropbox)" },
                 },
               },
             },
@@ -500,6 +522,83 @@ export function buildServer(sandbox: boolean) {
             itemCode:     { type: "string", description: "Cost code to update (e.g. 'Subcontractor - HVAC')" },
             subBidAmount: { type: "number", description: "Vendor/sub bid amount in dollars" },
             vendorName:   { type: "string", description: "Vendor or sub-contractor name" },
+          },
+        },
+      },
+
+      // ── PROFITABILITY & REPORTING ────────────────────────────────────────────
+      {
+        name: "get_job_profitability",
+        description:
+          "CRAFTWELL (Google Sheets) — Return a per-job profitability summary: contract value, total " +
+          "actual spend, gross profit in dollars, and margin percentage. Use this, NOT QuickBooks " +
+          "P&L reports, when the user asks how much profit is on a Craftwell job or what the margin is. " +
+          "Accepts partial addresses (e.g. '1234 Demo' matches 'SANDBOX - 1234 Demo Ave').",
+        inputSchema: {
+          type: "object",
+          required: ["jobName"],
+          properties: {
+            jobName: {
+              type: "string",
+              description: "Job name or partial address — the system will find the best match",
+            },
+          },
+        },
+      },
+      {
+        name: "get_overbudget_report",
+        description:
+          "CRAFTWELL (Google Sheets) — Scan every active job and return a list of all cost codes " +
+          "that have exceeded their budgeted amount. Shows job name, cost code, budgeted amount, " +
+          "actual spend, and the overage amount. Use this, NOT QuickBooks, for a cross-portfolio " +
+          "over-budget alert across all Craftwell jobs.",
+        inputSchema: { type: "object", properties: {} },
+      },
+
+      // ── PIPELINE VALUE ───────────────────────────────────────────────────────
+      {
+        name: "get_pipeline_value",
+        description:
+          "CRAFTWELL CRM (Google Sheets) — Summarize the total estimated value and signed contract " +
+          "amount across all active CRM leads, grouped by pipeline stage. Use this when the user asks " +
+          "about total pipeline value, backlog, or how much revenue is in the funnel. " +
+          "NOT a QuickBooks financial report.",
+        inputSchema: { type: "object", properties: {} },
+      },
+
+      // ── SUBCONTRACTOR ROLODEX ────────────────────────────────────────────────
+      {
+        name: "list_subs",
+        description:
+          "CRAFTWELL (Google Sheets) — List all subcontractors and vendors from the Craftwell Contacts " +
+          "sheet — company name, trade, contact name, phone, and email. Use this when looking up sub " +
+          "contact info or checking which subs are in the rolodex. NOT a QuickBooks vendor list.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            trade: {
+              type: "string",
+              description: "Filter by trade (e.g. 'Plumbing', 'Electrical', 'HVAC'). Leave empty for all subs.",
+            },
+          },
+        },
+      },
+      {
+        name: "add_sub",
+        description:
+          "CRAFTWELL (Google Sheets) — Add a new subcontractor or vendor to the Craftwell Contacts " +
+          "sheet. Use when onboarding a new sub who isn't already in the rolodex. NOT a QuickBooks " +
+          "vendor creation tool.",
+        inputSchema: {
+          type: "object",
+          required: ["company", "trade"],
+          properties: {
+            company: { type: "string", description: "Company or business name" },
+            trade:   { type: "string", description: "Trade specialty (e.g. 'Plumbing', 'Electrical', 'HVAC', 'Tile', 'Framing')" },
+            contact: { type: "string", description: "Primary contact name" },
+            phone:   { type: "string", description: "Phone number" },
+            email:   { type: "string", description: "Email address" },
+            notes:   { type: "string", description: "Any notes (license number, insurance status, etc.)" },
           },
         },
       },
@@ -758,8 +857,9 @@ export function buildServer(sandbox: boolean) {
             const txWithDate = transactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
             const lines = txWithDate.map(tx =>
               `  ${tx["date"]}  ${tx["itemCode"]}  $${Number(tx["amount"]).toFixed(2)}` +
-              (tx["vendor"]      ? `  (${tx["vendor"]})`      : "") +
-              (tx["description"] ? `  — ${tx["description"]}` : "")
+              (tx["vendor"]        ? `  (${tx["vendor"]})`          : "") +
+              (tx["description"]   ? `  — ${tx["description"]}`     : "") +
+              (tx["attachmentUrl"] ? `  📎 ${tx["attachmentUrl"]}`  : "")
             );
             // Simulate an over-budget warning for testing purposes when amount > 5000
             const bigTx = transactions.find(tx => Number(tx.amount) > 5_000);
@@ -855,6 +955,213 @@ export function buildServer(sandbox: boolean) {
           const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
           return result.success
             ? ok(`✅ Job "${jobName}" marked as completed on ${date}.`)
+            : fail(result.error ?? "Unknown error from Apps Script.");
+        }
+
+        // ── get_job_profitability ────────────────────────────────────────────
+        case "get_job_profitability": {
+          const { jobName: jobInput } = args as { jobName: string };
+          const jobName = await resolveJobName(jobInput, sandbox);
+          if (sandbox) {
+            const contractValue = SANDBOX_CONTRACT_VALUES[jobName] ?? 0;
+            const actuals = SANDBOX_BUDGET_ROWS.reduce((sum, r) => sum + parseDollar(r[3]), 0);
+            const profit  = contractValue - actuals;
+            const margin  = contractValue > 0 ? (profit / contractValue) * 100 : 0;
+            return sandboxOk(
+              `Profitability for "${jobName}" (mock):\n\n` +
+              `  Contract Value:  $${contractValue.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+              `  Total Actuals:   $${actuals.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+              `  Gross Profit:    $${profit.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+              `  Margin:          ${margin.toFixed(1)}%`
+            );
+          }
+          const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(jobName)}`);
+          if (data.error) return fail(data.error);
+          const rows: string[][] = data.rows ?? [];
+          const headers: string[] = data.headers ?? [];
+          const contractValue = parseDollar(data.contractValue ?? data.summary?.contractValue);
+          const actualIdx     = headers.findIndex((h: string) => /actual/i.test(h));
+          const actuals = actualIdx >= 0
+            ? rows.reduce((sum, r) => sum + parseDollar(r[actualIdx]), 0)
+            : 0;
+          const profit = contractValue - actuals;
+          const margin = contractValue > 0 ? (profit / contractValue) * 100 : 0;
+          return ok(
+            `Profitability for "${jobName}":\n\n` +
+            `  Contract Value:  $${contractValue.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+            `  Total Actuals:   $${actuals.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+            `  Gross Profit:    $${profit.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
+            `  Margin:          ${margin.toFixed(1)}%`
+          );
+        }
+
+        // ── get_overbudget_report ────────────────────────────────────────────
+        case "get_overbudget_report": {
+          if (sandbox) {
+            type OverRow = [string, string, string, string, string];
+            const flagged: OverRow[] = [];
+            for (const job of SANDBOX_JOBS) {
+              for (const r of SANDBOX_BUDGET_ROWS) {
+                const remaining = parseDollar(r[5]);
+                if (remaining < 0) {
+                  flagged.push([job, r[0], r[1], r[3], r[5]]);
+                }
+              }
+            }
+            if (!flagged.length) return sandboxOk("No over-budget cost codes found across all jobs. ✅");
+            const headers = ["Job", "Cost Code", "Budgeted", "Actual", "Over By"];
+            const display: string[][] = flagged.map(([job, code, budget, actual, rem]) => [
+              job, code, budget, actual, `$${Math.abs(parseDollar(rem)).toFixed(2)} over`,
+            ]);
+            return sandboxOk(
+              `⚠️  ${flagged.length} over-budget cost code(s) found (mock):\n\n` +
+              formatTable(headers, display)
+            );
+          }
+          const dropData  = await budgetGet("getDropdownData");
+          const jobs: string[] = dropData.jobs ?? [];
+          if (!jobs.length) return ok("No jobs found.");
+          type OverRow = [string, string, string, string, string];
+          const flagged: OverRow[] = [];
+          for (const job of jobs) {
+            try {
+              const data = await budgetGet(`getJobBudget&jobName=${encodeURIComponent(job)}`);
+              if (data.error) continue;
+              const headers: string[] = data.headers ?? [];
+              const rows: string[][]  = data.rows ?? [];
+              const remIdx = headers.findIndex((h: string) => /remaining/i.test(h));
+              const budIdx = headers.findIndex((h: string) => /budget/i.test(h));
+              const actIdx = headers.findIndex((h: string) => /actual/i.test(h));
+              const ccIdx  = headers.findIndex((h: string) => /cost.?code/i.test(h));
+              if (remIdx < 0) continue;
+              for (const r of rows) {
+                const remaining = parseDollar(r[remIdx]);
+                if (remaining < 0) {
+                  flagged.push([
+                    job,
+                    ccIdx >= 0  ? r[ccIdx]  : "?",
+                    budIdx >= 0 ? r[budIdx] : "?",
+                    actIdx >= 0 ? r[actIdx] : "?",
+                    `$${Math.abs(remaining).toFixed(2)} over`,
+                  ]);
+                }
+              }
+            } catch {
+              // skip jobs that fail — don't abort entire report
+            }
+          }
+          if (!flagged.length) return ok("No over-budget cost codes found across all active jobs. ✅");
+          const rptHeaders = ["Job", "Cost Code", "Budgeted", "Actual", "Over By"];
+          return ok(
+            `⚠️  ${flagged.length} over-budget cost code(s) across ${jobs.length} jobs:\n\n` +
+            formatTable(rptHeaders, flagged as string[][])
+          );
+        }
+
+        // ── get_pipeline_value ───────────────────────────────────────────────
+        case "get_pipeline_value": {
+          if (sandbox) {
+            let totalEstimated = 0;
+            let totalContract  = 0;
+            const stageMap: Record<string, { est: number; contract: number; count: number }> = {};
+            for (const lead of SANDBOX_LEADS) {
+              const stage    = lead.data["PIPELINE STAGE"] ?? "Unknown";
+              const est      = parseDollar(lead.data["ESTIMATED VALUE"]);
+              const contract = parseDollar(lead.data["CONTRACT AMOUNT"]);
+              totalEstimated += est;
+              totalContract  += contract;
+              if (!stageMap[stage]) stageMap[stage] = { est: 0, contract: 0, count: 0 };
+              stageMap[stage].est      += est;
+              stageMap[stage].contract += contract;
+              stageMap[stage].count++;
+            }
+            const lines = Object.entries(stageMap).map(([stage, v]) =>
+              `  ${stage.padEnd(30)}  ${v.count} lead(s)  Est: $${v.est.toLocaleString()}  Contract: $${v.contract.toLocaleString()}`
+            );
+            return sandboxOk(
+              `Pipeline Value Summary (mock):\n\n` +
+              lines.join("\n") +
+              `\n\n  TOTAL ESTIMATED VALUE:  $${totalEstimated.toLocaleString()}\n` +
+              `  TOTAL CONTRACT AMOUNT:  $${totalContract.toLocaleString()}`
+            );
+          }
+          const data  = await crmGet("getCrmData");
+          const EXCLUDED = ["COMPLETED", "DEAD", "LOST"];
+          const active = (data.crmLeads ?? []).filter((l: { data: Record<string, string> }) => {
+            const stage = (l.data["PIPELINE STAGE"] ?? "").toUpperCase();
+            return !EXCLUDED.some(kw => stage.includes(kw));
+          });
+          if (!active.length) return ok("No active leads found in CRM.");
+          let totalEstimated = 0;
+          let totalContract  = 0;
+          const stageMap: Record<string, { est: number; contract: number; count: number }> = {};
+          for (const lead of active as Array<{ data: Record<string, string> }>) {
+            const stage    = lead.data["PIPELINE STAGE"] ?? "Unknown";
+            const est      = parseDollar(lead.data["ESTIMATED VALUE"]);
+            const contract = parseDollar(lead.data["CONTRACT AMOUNT"]);
+            totalEstimated += est;
+            totalContract  += contract;
+            if (!stageMap[stage]) stageMap[stage] = { est: 0, contract: 0, count: 0 };
+            stageMap[stage].est      += est;
+            stageMap[stage].contract += contract;
+            stageMap[stage].count++;
+          }
+          const lines = Object.entries(stageMap).map(([stage, v]) =>
+            `  ${stage.padEnd(30)}  ${v.count} lead(s)  Est: $${v.est.toLocaleString()}  Contract: $${v.contract.toLocaleString()}`
+          );
+          return ok(
+            `Pipeline Value Summary (${active.length} active leads):\n\n` +
+            lines.join("\n") +
+            `\n\n  TOTAL ESTIMATED VALUE:  $${totalEstimated.toLocaleString()}\n` +
+            `  TOTAL CONTRACT AMOUNT:  $${totalContract.toLocaleString()}`
+          );
+        }
+
+        // ── list_subs ────────────────────────────────────────────────────────
+        case "list_subs": {
+          const { trade } = args as { trade?: string };
+          if (sandbox) {
+            let subs = SANDBOX_SUBS;
+            if (trade) subs = subs.filter(s => s.trade.toLowerCase().includes(trade.toLowerCase()));
+            if (!subs.length) return sandboxOk(`No subs found${trade ? ` for trade "${trade}"` : ""} (mock).`);
+            const rows = subs.map(s => [s.subId, s.company, s.trade, s.contact, s.phone, s.email]);
+            return sandboxOk(
+              `${subs.length} sub(s) in rolodex${trade ? ` (trade: ${trade})` : ""} (mock):\n\n` +
+              formatTable(["ID", "Company", "Trade", "Contact", "Phone", "Email"], rows)
+            );
+          }
+          let action = "listSubs";
+          if (trade) action += `&trade=${encodeURIComponent(trade)}`;
+          const data  = await budgetGet(action);
+          if (data.error) return fail(data.error);
+          const subs: Array<Record<string, string>> = data.subs ?? [];
+          if (!subs.length) return ok(`No subs found${trade ? ` for trade "${trade}"` : ""}.`);
+          const rows  = subs.map(s => [s.subId ?? "", s.company ?? "", s.trade ?? "", s.contact ?? "", s.phone ?? "", s.email ?? ""]);
+          return ok(
+            `${subs.length} sub(s)${trade ? ` (trade: ${trade})` : ""}:\n\n` +
+            formatTable(["ID", "Company", "Trade", "Contact", "Phone", "Email"], rows)
+          );
+        }
+
+        // ── add_sub ──────────────────────────────────────────────────────────
+        case "add_sub": {
+          const { company, trade, contact, phone, email, notes } = args as {
+            company: string; trade: string; contact?: string;
+            phone?: string; email?: string; notes?: string;
+          };
+          if (sandbox) {
+            const mockId = `SUB-${String(SANDBOX_SUBS.length + 1).padStart(3, "0")}`;
+            return sandboxOk(
+              `✅ Would add sub "${company}" (${trade}) as ${mockId}` +
+              (contact ? `\n  Contact: ${contact}` : "") +
+              (phone   ? `\n  Phone:   ${phone}`   : "") +
+              (email   ? `\n  Email:   ${email}`   : "") +
+              (notes   ? `\n  Notes:   ${notes}`   : "")
+            );
+          }
+          const result = await budgetPost("addSub", { company, trade, contact, phone, email, notes });
+          return result.success
+            ? ok(`✅ Sub "${company}" (${trade}) added to rolodex. ID: ${result.subId ?? "assigned"}`)
             : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
