@@ -237,6 +237,104 @@ interface BudgetWarning {
   overBy:   number;
 }
 
+// ── Duplicate detection ───────────────────────────────────────────────────────
+
+interface TxRow {
+  rowIndex: number;
+  date:     string;
+  costCode: string;
+  vendor:   string;
+  amount:   number;
+  verified: boolean;
+}
+
+interface DuplicateAlert {
+  flag:             "EXACT" | "SAME_AMOUNT_VENDOR" | "SAME_VENDOR_DAY";
+  emoji:            string;
+  existingRowIndex: number;
+  line:             string;
+}
+
+function parseTxRows(
+  headers:    string[],
+  rows:       string[][],
+  rowIndices?: number[],
+): TxRow[] {
+  const hi = (pat: RegExp) => headers.findIndex(h => pat.test(h));
+  const dateIdx   = hi(/^date$/i);
+  const codeIdx   = hi(/cost.?code/i);
+  const vendorIdx = hi(/vendor/i);
+  const amtIdx    = hi(/amount/i);
+  const verIdx    = hi(/verified/i);
+  return rows.map((r, i) => ({
+    rowIndex: rowIndices?.[i] ?? (i + 2),
+    date:     dateIdx   >= 0 ? String(r[dateIdx]   ?? "") : "",
+    costCode: codeIdx   >= 0 ? String(r[codeIdx]   ?? "") : "",
+    vendor:   vendorIdx >= 0 ? String(r[vendorIdx] ?? "") : "",
+    amount:   amtIdx    >= 0 ? parseDollar(r[amtIdx]) : 0,
+    verified: verIdx    >= 0 ? String(r[verIdx] ?? "").toUpperCase() === "Y" : false,
+  }));
+}
+
+function detectDuplicates(
+  existing: TxRow[],
+  incoming: Array<{ date: string; costCode: string; vendor: string; amount: number }>,
+): DuplicateAlert[] {
+  const alerts: DuplicateAlert[] = [];
+  const unverified = existing.filter(r => !r.verified);
+
+  for (const tx of incoming) {
+    const txV = tx.vendor.toLowerCase().trim();
+    if (!txV) continue;
+
+    for (const ex of unverified) {
+      const exV = ex.vendor.toLowerCase().trim();
+      if (!exV || exV !== txV) continue;
+
+      const amtMatch  = Math.abs(ex.amount - tx.amount) < 0.01;
+      const dateMatch = ex.date === tx.date;
+      const codeMatch = ex.costCode === tx.costCode;
+
+      if (dateMatch && amtMatch && codeMatch) {
+        alerts.push({
+          flag: "EXACT", emoji: "🔴",
+          existingRowIndex: ex.rowIndex,
+          line: `Exact match — ${tx.vendor} | ${tx.costCode} | $${tx.amount.toFixed(2)} | ${tx.date} — already in sheet row ${ex.rowIndex}`,
+        });
+      } else if (amtMatch && !dateMatch) {
+        alerts.push({
+          flag: "SAME_AMOUNT_VENDOR", emoji: "🟡",
+          existingRowIndex: ex.rowIndex,
+          line: `Same vendor + amount, different date — ${tx.vendor} | $${tx.amount.toFixed(2)} | existing: ${ex.date} vs new: ${tx.date} (row ${ex.rowIndex})`,
+        });
+      } else if (dateMatch && !amtMatch) {
+        alerts.push({
+          flag: "SAME_VENDOR_DAY", emoji: "🟠",
+          existingRowIndex: ex.rowIndex,
+          line: `Same vendor + date, different amounts — ${tx.vendor} | ${tx.date} | existing: $${ex.amount.toFixed(2)} vs new: $${tx.amount.toFixed(2)} (row ${ex.rowIndex})`,
+        });
+      }
+    }
+  }
+  return alerts;
+}
+
+function formatDupAlerts(alerts: DuplicateAlert[]): string {
+  const lines     = alerts.map(a => `  ${a.emoji} ${a.line}`);
+  const ackRows   = [...new Set(alerts.map(a => a.existingRowIndex))];
+  const isExact   = alerts.some(a => a.flag === "EXACT");
+  const severity  = isExact
+    ? "Review before paying — at least one looks like an exact double-entry."
+    : "These may be legitimate. Verify in the sheet before paying.";
+  return (
+    `\n\n⚠️  DUPLICATE ALERT — ${alerts.length} potential duplicate(s) found:\n\n` +
+    lines.join("\n") +
+    `\n\n  ${severity}` +
+    `\n  Transactions were recorded. If confirmed legitimate, call:\n` +
+    `  acknowledge_transactions jobName + rowIndices: [${ackRows.join(", ")}]`
+  );
+}
+
 // ── Diagnostic trace ──────────────────────────────────────────────────────────
 // Silent observer: instruments every HTTP hop at the fetch level. Activates
 // only when a tool call fails or times out — zero output on success.
@@ -276,7 +374,7 @@ let _activeTrace: Trace | null = null;
 
 export function buildServer(sandbox: boolean) {
   const server = new Server(
-    { name: "craftwell", version: "1.5.0" },
+    { name: "craftwell", version: "1.6.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -647,6 +745,28 @@ export function buildServer(sandbox: boolean) {
         },
       },
 
+      // ── DUPLICATE MANAGEMENT ─────────────────────────────────────────────────
+      {
+        name: "acknowledge_transactions",
+        description:
+          "CRAFTWELL (Google Sheets) — Mark specific transaction rows as verified/legitimate to suppress " +
+          "future duplicate alerts for those entries. Use the sheet row numbers shown in the duplicate alert " +
+          "message. Once marked, those rows are skipped by all future duplicate checks on this job. " +
+          "Requires the Verified column to be present in the transaction sheet (Apps Script v2+).",
+        inputSchema: {
+          type: "object",
+          required: ["jobName", "rowIndices"],
+          properties: {
+            jobName:    { type: "string", description: "Job name or partial address — partial match is OK" },
+            rowIndices: {
+              type: "array",
+              items: { type: "number" },
+              description: "Sheet row numbers to mark as verified (shown in duplicate alert messages, e.g. [14, 22])",
+            },
+          },
+        },
+      },
+
       // ── JOB LIFECYCLE ────────────────────────────────────────────────────────
       {
         name: "mark_job_complete",
@@ -900,7 +1020,19 @@ export function buildServer(sandbox: boolean) {
           const jobName = await resolveJobName(jobInput, sandbox);
           const today   = todayISO();
 
+          // Build normalized incoming list for duplicate detection
+          const incoming = transactions.map(tx => ({
+            date:     String(tx["date"] ?? today),
+            costCode: String(tx["itemCode"] ?? ""),
+            vendor:   String(tx["vendor"]   ?? ""),
+            amount:   Number(tx["amount"]),
+          }));
+
           if (sandbox) {
+            // Run duplicate detection against sandbox mock data
+            const existingTxRows = parseTxRows(SANDBOX_TX_HEADERS, SANDBOX_TX_ROWS);
+            const dupAlerts = detectDuplicates(existingTxRows, incoming);
+
             const txWithDate = transactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
             const lines = txWithDate.map(tx =>
               `  ${tx["date"]}  ${tx["itemCode"]}  $${Number(tx["amount"]).toFixed(2)}` +
@@ -908,13 +1040,29 @@ export function buildServer(sandbox: boolean) {
               (tx["description"]   ? `  — ${tx["description"]}`     : "") +
               (tx["attachmentUrl"] ? `  📎 ${tx["attachmentUrl"]}`  : "")
             );
-            // Simulate an over-budget warning for testing purposes when amount > 5000
             const bigTx = transactions.find(tx => Number(tx.amount) > 5_000);
             let msg = `✅ Would record ${transactions.length} transaction(s) on "${jobName}":\n\n${lines.join("\n")}`;
             if (bigTx) {
               msg += "\n\n⚠️  OVER-BUDGET ALERT (simulated) — transaction exceeds $5,000 threshold for demo purposes.";
             }
+            if (dupAlerts.length > 0) msg += formatDupAlerts(dupAlerts);
             return sandboxOk(msg);
+          }
+
+          // Pre-fetch existing transactions for duplicate detection (don't let failures block the write)
+          let dupAlerts: DuplicateAlert[] = [];
+          try {
+            const txData = await budgetGet(`getJobTransactions&jobName=${encodeURIComponent(jobName)}`);
+            if (!txData.error) {
+              const existingTxRows = parseTxRows(
+                txData.headers  ?? [],
+                txData.rows     ?? [],
+                txData.rowIndices,
+              );
+              dupAlerts = detectDuplicates(existingTxRows, incoming);
+            }
+          } catch {
+            // Duplicate detection is non-blocking — proceed with the write regardless
           }
 
           const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
@@ -930,6 +1078,7 @@ export function buildServer(sandbox: boolean) {
             }
             msg += "\n\nTransactions were recorded. Please review the budget.";
           }
+          if (dupAlerts.length > 0) msg += formatDupAlerts(dupAlerts);
           return ok(msg);
         }
 
@@ -1210,6 +1359,22 @@ export function buildServer(sandbox: boolean) {
           return result.success
             ? ok(`✅ Sub "${company}" (${trade}) added to rolodex. ID: ${result.subId ?? "assigned"}`)
             : fail(result.error ?? "Unknown error from Apps Script.");
+        }
+
+        // ── acknowledge_transactions ─────────────────────────────────────────
+        case "acknowledge_transactions": {
+          const { jobName: jobInput, rowIndices } = args as { jobName: string; rowIndices: number[] };
+          const jobName = await resolveJobName(jobInput, sandbox);
+          if (sandbox) {
+            return sandboxOk(
+              `✅ Would mark rows [${rowIndices.join(", ")}] as Verified on "${jobName}" (mock).\n` +
+              `  These rows will be skipped in future duplicate checks.`
+            );
+          }
+          const result = await budgetPost("acknowledgeTransactions", { jobName, rowIndices });
+          return result.success
+            ? ok(`✅ ${rowIndices.length} row(s) marked as verified on "${jobName}". They will be skipped in future duplicate checks.`)
+            : fail(result.error ?? "acknowledgeTransactions not yet available — update your Apps Script to support this action.");
         }
 
         // ── add_profit_draw ──────────────────────────────────────────────────
