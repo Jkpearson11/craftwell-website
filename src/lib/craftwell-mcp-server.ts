@@ -113,42 +113,51 @@ function sanitizeSheetValue(v: unknown): string {
 
 async function budgetGet(action: string) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
+  const label = action.split("&")[0];
+  _activeTrace?.mark(`→ budgetGet("${label}") sent`);
   const res = await fetch(`${BUDGET_URL}?action=${action}`, {
     signal: AbortSignal.timeout(20_000),
   });
+  _activeTrace?.mark(`← budgetGet("${label}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
 async function budgetPost(action: string, body: Record<string, unknown>) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
+  _activeTrace?.mark(`→ budgetPost("${action}") sent`);
   const res = await fetch(BUDGET_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...body }),
     signal: AbortSignal.timeout(55_000),
   });
+  _activeTrace?.mark(`← budgetPost("${action}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
 async function crmGet(action: string) {
   if (!CRM_URL) throw new Error("CRM_SCRIPT_URL is not configured.");
+  _activeTrace?.mark(`→ crmGet("${action}") sent`);
   const res = await fetch(`${CRM_URL}?action=${action}`, {
     signal: AbortSignal.timeout(20_000),
   });
+  _activeTrace?.mark(`← crmGet("${action}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
 async function crmPost(action: string, body: Record<string, unknown>) {
   if (!CRM_URL) throw new Error("CRM_SCRIPT_URL is not configured.");
+  _activeTrace?.mark(`→ crmPost("${action}") sent`);
   const res = await fetch(CRM_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...body }),
     signal: AbortSignal.timeout(20_000),
   });
+  _activeTrace?.mark(`← crmPost("${action}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
@@ -228,11 +237,46 @@ interface BudgetWarning {
   overBy:   number;
 }
 
+// ── Diagnostic trace ──────────────────────────────────────────────────────────
+// Silent observer: instruments every HTTP hop at the fetch level. Activates
+// only when a tool call fails or times out — zero output on success.
+
+interface TracePoint { label: string; ms: number; }
+
+class Trace {
+  private readonly t0 = Date.now();
+  private readonly pts: TracePoint[] = [];
+
+  mark(label: string) {
+    this.pts.push({ label, ms: Date.now() - this.t0 });
+  }
+
+  elapsed(): number { return Date.now() - this.t0; }
+
+  report(verdict: string): string {
+    const pad = (n: number) => String(n).padStart(5);
+    const sep = "─".repeat(54);
+    return [
+      "",
+      `🔍 DIAGNOSTIC TRACE — ${verdict}`,
+      sep,
+      ...this.pts.map(p => `  +${pad(p.ms)}ms  ${p.label}`),
+      `  +${pad(this.elapsed())}ms  [trace end]`,
+      sep,
+      "  Tip: the slowest gap between consecutive lines is the bottleneck.",
+    ].join("\n");
+  }
+}
+
+// One active trace per serverless invocation. Safe because each Netlify
+// function execution is a single-threaded Node.js isolate.
+let _activeTrace: Trace | null = null;
+
 // ── Build MCP server ──────────────────────────────────────────────────────────
 
 export function buildServer(sandbox: boolean) {
   const server = new Server(
-    { name: "craftwell", version: "1.4.0" },
+    { name: "craftwell", version: "1.5.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -644,6 +688,9 @@ export function buildServer(sandbox: boolean) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
+    const trace = new Trace();
+    _activeTrace = trace;
+    trace.mark(`tool "${name}" invoked`);
 
     try {
       switch (name) {
@@ -1191,16 +1238,26 @@ export function buildServer(sandbox: boolean) {
       }
 
     } catch (e) {
-      if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+      const isTimeout = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+      trace.mark(`${isTimeout ? "TIMEOUT" : "ERROR"}: ${e instanceof Error ? e.message : String(e)}`);
+      const diagReport = trace.report(isTimeout ? "TIMEOUT" : "ERROR");
+
+      if (isTimeout) {
         if (name === "create_job") {
           return ok(
             "⏳ Job creation is taking longer than expected (Google Sheets template copy can exceed 60s). " +
-            "The operation may have already completed — check your spreadsheet to verify the job tab exists before retrying."
+            "The operation may have already completed — check your spreadsheet to verify the job tab exists before retrying." +
+            diagReport
           );
         }
-        return fail("Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again.");
+        return fail(
+          "Request timed out waiting for Google Apps Script. The script may be cold-starting — wait 30 seconds and try again." +
+          diagReport
+        );
       }
-      return fail(e instanceof Error ? e.message : String(e));
+      return fail((e instanceof Error ? e.message : String(e)) + diagReport);
+    } finally {
+      _activeTrace = null;
     }
   });
 
