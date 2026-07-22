@@ -1446,6 +1446,17 @@ export async function createMcpHandler(req: NextRequest, sandbox: boolean): Prom
     const headers = new Headers(response.headers);
     Object.entries(CORS).forEach(([k, v]) => headers.set(k, v));
 
+    // Self-ping: resets Netlify's 10-min inactivity timer after every real
+    // user request. If the scheduled keepalive ever slips, any tool call
+    // the user makes keeps the function warm for another 9+ minutes.
+    // Fire-and-forget — never blocks the response.
+    try {
+      const warmUrl = new URL("/api/warm", req.url).toString();
+      fetch(warmUrl, { signal: AbortSignal.timeout(3_000) }).catch(() => {});
+    } catch {
+      // URL construction can fail in test environments — ignore
+    }
+
     return new NextResponse(response.body, { status: response.status, headers });
   } catch (err) {
     console.error("[MCP] Unhandled error:", err);
