@@ -5,6 +5,9 @@
 [build.environment]
   NETLIFY_NEXT_PLUGIN_SKIP = "false"
 
+[functions]
+  directory = "netlify/functions"
+
 # Security headers for all routes (Next.js headers() also applies, this covers
 # static files served directly by Netlify's CDN before the Next.js runtime)
 [[headers]]
