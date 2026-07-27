@@ -7,6 +7,7 @@
  * Apps Script endpoint.
  */
 
+import { after }                      from "next/server";
 import { NextRequest, NextResponse } from "next/server";
 import { Server }   from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport }
@@ -111,7 +112,7 @@ function sanitizeSheetValue(v: unknown): string {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-async function budgetGet(action: string, timeoutMs = 20_000) {
+async function budgetGet(action: string, timeoutMs = 15_000) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
   const label = action.split("&")[0];
   _activeTrace?.mark(`→ budgetGet("${label}") sent`);
@@ -130,18 +131,18 @@ async function budgetPost(action: string, body: Record<string, unknown>) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...body }),
-    signal: AbortSignal.timeout(55_000),
+    signal: AbortSignal.timeout(40_000),
   });
   _activeTrace?.mark(`← budgetPost("${action}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
-async function crmGet(action: string) {
+async function crmGet(action: string, timeoutMs = 15_000) {
   if (!CRM_URL) throw new Error("CRM_SCRIPT_URL is not configured.");
   _activeTrace?.mark(`→ crmGet("${action}") sent`);
   const res = await fetch(`${CRM_URL}?action=${action}`, {
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   _activeTrace?.mark(`← crmGet("${action}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
@@ -1572,12 +1573,12 @@ export async function createMcpHandler(req: NextRequest, sandbox: boolean): Prom
     Object.entries(CORS).forEach(([k, v]) => headers.set(k, v));
 
     // Self-ping: resets Netlify's 10-min inactivity timer after every real
-    // user request. If the scheduled keepalive ever slips, any tool call
-    // the user makes keeps the function warm for another 9+ minutes.
-    // Fire-and-forget — never blocks the response.
+    // user request. Wrapped in after() so Next.js registers it with the
+    // platform's waitUntil — guaranteeing it runs even after the response
+    // is flushed (bare fire-and-forget may be frozen by the runtime first).
     try {
       const warmUrl = new URL("/api/warm", req.url).toString();
-      fetch(warmUrl, { signal: AbortSignal.timeout(3_000) }).catch(() => {});
+      after(() => fetch(warmUrl, { signal: AbortSignal.timeout(3_000) }).catch(() => {}));
     } catch {
       // URL construction can fail in test environments — ignore
     }
