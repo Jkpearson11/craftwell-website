@@ -8,6 +8,9 @@
 [functions]
   directory = "netlify/functions"
 
+[functions.keepalive]
+  schedule = "*/9 * * * *"
+
 # Security headers for all routes (Next.js headers() also applies, this covers
 # static files served directly by Netlify's CDN before the Next.js runtime)
 [[headers]]
