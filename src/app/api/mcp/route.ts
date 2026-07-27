@@ -10,6 +10,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CORS, createMcpHandler }    from "@/lib/craftwell-mcp-server";
 
+export const maxDuration = 60;
+
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS });
 }
