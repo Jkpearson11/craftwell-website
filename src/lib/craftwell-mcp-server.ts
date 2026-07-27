@@ -7,7 +7,6 @@
  * Apps Script endpoint.
  */
 
-import { after }                      from "next/server";
 import { NextRequest, NextResponse } from "next/server";
 import { Server }   from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport }
@@ -1572,13 +1571,10 @@ export async function createMcpHandler(req: NextRequest, sandbox: boolean): Prom
     const headers = new Headers(response.headers);
     Object.entries(CORS).forEach(([k, v]) => headers.set(k, v));
 
-    // Self-ping: resets Netlify's 10-min inactivity timer after every real
-    // user request. Wrapped in after() so Next.js registers it with the
-    // platform's waitUntil — guaranteeing it runs even after the response
-    // is flushed (bare fire-and-forget may be frozen by the runtime first).
+    // Self-ping: fire-and-forget to reset Netlify's 10-min inactivity timer.
     try {
       const warmUrl = new URL("/api/warm", req.url).toString();
-      after(() => fetch(warmUrl, { signal: AbortSignal.timeout(3_000) }).catch(() => {}));
+      fetch(warmUrl, { signal: AbortSignal.timeout(3_000) }).catch(() => {});
     } catch {
       // URL construction can fail in test environments — ignore
     }
