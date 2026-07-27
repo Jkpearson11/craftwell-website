@@ -1,16 +1,6 @@
-/**
- * netlify/functions/keepalive.js
- *
- * Netlify Scheduled Function — runs every 9 minutes.
- *
- * Netlify free-tier functions spin down after ~10 minutes of inactivity,
- * causing cold-start 502s on the next real request. This function pings
- * all three MCP endpoints before the 10-minute window closes, keeping
- * the Next.js runtime perpetually warm.
- *
- * Schedule: every 9 minutes (cron "*/9 * * * *")
- * Deploy: automatically picked up by Netlify from netlify/functions/
- */
+// netlify/functions/keepalive.mjs
+// Netlify Scheduled Function — fires every 9 minutes (schedule in netlify.toml).
+// Pings /api/warm, /api/mcp, and /api/mcp-sandbox to prevent cold-start 502s.
 
 export default async () => {
   const base = (process.env.URL ?? "https://craftwellconstruction.com").replace(/\/$/, "");
@@ -39,4 +29,3 @@ export default async () => {
     }
   }
 };
-
