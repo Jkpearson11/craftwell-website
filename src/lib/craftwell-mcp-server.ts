@@ -111,12 +111,12 @@ function sanitizeSheetValue(v: unknown): string {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-async function budgetGet(action: string) {
+async function budgetGet(action: string, timeoutMs = 20_000) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
   const label = action.split("&")[0];
   _activeTrace?.mark(`→ budgetGet("${label}") sent`);
   const res = await fetch(`${BUDGET_URL}?action=${action}`, {
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   _activeTrace?.mark(`← budgetGet("${label}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
@@ -1049,10 +1049,16 @@ export function buildServer(sandbox: boolean) {
             return sandboxOk(msg);
           }
 
-          // Pre-fetch existing transactions for duplicate detection (don't let failures block the write)
+          // Pre-fetch existing transactions for duplicate detection.
+          // Hard cap at 4s — if Apps Script is cold-starting we skip the check
+          // and proceed to the write immediately. The write itself has a 55s
+          // budget; a slow pre-fetch must never eat into it.
           let dupAlerts: DuplicateAlert[] = [];
           try {
-            const txData = await budgetGet(`getJobTransactions&jobName=${encodeURIComponent(jobName)}`);
+            const txData = await budgetGet(
+              `getJobTransactions&jobName=${encodeURIComponent(jobName)}`,
+              4_000,
+            );
             if (!txData.error) {
               const existingTxRows = parseTxRows(
                 txData.headers  ?? [],
@@ -1062,7 +1068,7 @@ export function buildServer(sandbox: boolean) {
               dupAlerts = detectDuplicates(existingTxRows, incoming);
             }
           } catch {
-            // Duplicate detection is non-blocking — proceed with the write regardless
+            // Pre-fetch timed out or failed — skip duplicate check, write proceeds
           }
 
           const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
