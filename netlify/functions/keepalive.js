@@ -1,5 +1,5 @@
 /**
- * netlify/functions/keepalive.mts
+ * netlify/functions/keepalive.js
  *
  * Netlify Scheduled Function — runs every 9 minutes.
  *
@@ -12,7 +12,7 @@
  * Deploy: automatically picked up by Netlify from netlify/functions/
  */
 
-export default async (): Promise<void> => {
+export default async () => {
   const base = (process.env.URL ?? "https://craftwellconstruction.com").replace(/\/$/, "");
 
   const endpoints = [
@@ -33,9 +33,9 @@ export default async (): Promise<void> => {
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === "fulfilled") {
-      console.log(`[keepalive] ✅ ${endpoints[i]} — HTTP ${r.value.status}`);
+      console.log(`[keepalive] OK ${endpoints[i]} — HTTP ${r.value.status}`);
     } else {
-      console.error(`[keepalive] ❌ ${endpoints[i]} — ${r.reason}`);
+      console.error(`[keepalive] FAIL ${endpoints[i]} — ${r.reason}`);
     }
   }
 };

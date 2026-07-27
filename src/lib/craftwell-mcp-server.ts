@@ -111,12 +111,12 @@ function sanitizeSheetValue(v: unknown): string {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-async function budgetGet(action: string) {
+async function budgetGet(action: string, timeoutMs = 20_000) {
   if (!BUDGET_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
   const label = action.split("&")[0];
   _activeTrace?.mark(`→ budgetGet("${label}") sent`);
   const res = await fetch(`${BUDGET_URL}?action=${action}`, {
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   _activeTrace?.mark(`← budgetGet("${label}") HTTP ${res.status}`);
   if (!res.ok) throw new Error(`Apps Script returned HTTP ${res.status}: ${res.statusText}`);
@@ -166,6 +166,15 @@ async function crmPost(action: string, body: Record<string, unknown>) {
 
 const todayISO = (): string => new Date().toISOString().split("T")[0];
 
+/** Returns an error string if s is not YYYY-MM-DD, or null if it's valid/absent. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function validateISODate(s: string | undefined, fieldName: string): string | null {
+  if (s === undefined || s === "") return null; // optional — caller provides default
+  if (!ISO_DATE_RE.test(s))
+    return `${fieldName} must be in YYYY-MM-DD format (got "${s}").`;
+  return null;
+}
+
 // ── Tool response helpers ─────────────────────────────────────────────────────
 
 function ok(text: string) {
@@ -192,7 +201,8 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
 }
 
-async function resolveJobName(input: string, sandbox: boolean): Promise<string> {
+async function resolveJobName(input: string | undefined, sandbox: boolean): Promise<string> {
+  if (!input || !input.trim()) throw new Error("jobName is required and must not be blank.");
   const jobs: string[] = sandbox
     ? SANDBOX_JOBS
     : (await budgetGet("getDropdownData")).jobs ?? [];
@@ -831,7 +841,13 @@ export function buildServer(sandbox: boolean) {
             return sandboxOk(`${SANDBOX_COST_CODES.length} cost codes (mock):\n\n${SANDBOX_COST_CODES.join("\n")}`);
           }
           const data  = await budgetGet("getDropdownData");
-          const codes = (data.costCodes ?? []).map((c: { code: string }) => c.code);
+          const codes = ((data.costCodes ?? []) as unknown[])
+            .map((c): string | null =>
+              c && typeof c === "object" && "code" in c && typeof (c as { code: unknown }).code === "string"
+                ? (c as { code: string }).code
+                : null
+            )
+            .filter((c): c is string => c !== null && c !== "");
           return ok(codes.length ? `${codes.length} cost codes:\n\n${codes.join("\n")}` : "No cost codes found.");
         }
 
@@ -925,8 +941,13 @@ export function buildServer(sandbox: boolean) {
         }
 
         // ── update_lead ──────────────────────────────────────────────────────
+        // NOTE(arch): crmPost("updateLead") requires rowIndex, not leadId, so we
+        // must pre-fetch getCrmData to resolve it. This is a terminal two-hop
+        // pattern (20s + 20s) that cannot be eliminated without an Apps Script
+        // change to accept leadId directly. On cold-start this may timeout.
         case "update_lead": {
           const { leadId, fields = {} } = args as { leadId: string; fields?: Record<string, string> };
+          if (!leadId || !leadId.trim()) return fail("leadId is required.");
           if (sandbox) {
             const lead = SANDBOX_LEADS.find(l => l.leadId.toUpperCase() === leadId.toUpperCase());
             if (!lead) {
@@ -940,8 +961,9 @@ export function buildServer(sandbox: boolean) {
             (l: { leadId: string }) => l.leadId.toUpperCase() === leadId.toUpperCase()
           );
           if (!lead) {
-            const ids = (data.crmLeads ?? []).map((l: { leadId: string }) => l.leadId).join(", ");
-            return fail(`Lead "${leadId}" not found. Available: ${ids || "none"}`);
+            // Intentionally omit the full lead list to avoid data leakage over an
+            // unauthenticated channel. Use list_crm_leads to see available lead IDs.
+            return fail(`Lead "${leadId}" not found. Call list_crm_leads to see available lead IDs.`);
           }
           const sanitizedFields = Object.fromEntries(
             Object.entries(fields).map(([k, v]) => [k, sanitizeSheetValue(v)])
@@ -956,6 +978,8 @@ export function buildServer(sandbox: boolean) {
             title: string; date: string; time?: string;
             durationMinutes?: number; description?: string; location?: string;
           };
+          const calDateErr = validateISODate(date, "date");
+          if (calDateErr) return fail(calDateErr);
           if (sandbox) {
             return sandboxOk(
               `✅ Would create calendar event: "${title}" on ${date}` +
@@ -990,7 +1014,21 @@ export function buildServer(sandbox: boolean) {
               (scopeOfWork     ? `\n  Scope: ${scopeOfWork}`                                  : "")
             );
           }
-          const result = await budgetPost("createJob", args as Record<string, unknown>);
+          // Sanitize all user-supplied strings to prevent formula injection.
+          const rawBudgetLines = (args as { budgetLines?: Array<{ itemCode: string; budget: number }> }).budgetLines ?? [];
+          const result = await budgetPost("createJob", {
+            jobName:         sanitizeSheetValue(jobName),
+            clientName:      sanitizeSheetValue(clientName),
+            address:         sanitizeSheetValue(address),
+            scopeOfWork:     scopeOfWork     ? sanitizeSheetValue(scopeOfWork)     : undefined,
+            contractValue,
+            operatingBudget,
+            startingMargin,
+            budgetLines:     rawBudgetLines.map(bl => ({
+              itemCode: sanitizeSheetValue(bl.itemCode),
+              budget:   bl.budget,
+            })),
+          });
           return result.success ? ok(`✅ ${result.message}`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
@@ -1017,11 +1055,28 @@ export function buildServer(sandbox: boolean) {
             jobName: string;
             transactions: Array<Record<string, unknown>>;
           };
+          // Validate all per-transaction dates before any network call
+          for (let i = 0; i < transactions.length; i++) {
+            const txDate = transactions[i]["date"] != null ? String(transactions[i]["date"]) : undefined;
+            const txDateErr = validateISODate(txDate, `transactions[${i}].date`);
+            if (txDateErr) return fail(txDateErr);
+          }
           const jobName = await resolveJobName(jobInput, sandbox);
           const today   = todayISO();
 
+          // Sanitize user-supplied strings to prevent formula injection in Sheets.
+          // attachmentUrl is a URL stored as plain text, not a formula, so it is
+          // NOT passed through sanitizeSheetValue (which would break leading '=' in
+          // a legitimate data: URL). It is written as-is by Apps Script.
+          const sanitizedTransactions: Array<Record<string, unknown>> = transactions.map(tx => ({
+            ...tx,
+            itemCode:    sanitizeSheetValue(tx["itemCode"]),
+            vendor:      sanitizeSheetValue(tx["vendor"]),
+            description: sanitizeSheetValue(tx["description"]),
+          }));
+
           // Build normalized incoming list for duplicate detection
-          const incoming = transactions.map(tx => ({
+          const incoming = sanitizedTransactions.map(tx => ({
             date:     String(tx["date"] ?? today),
             costCode: String(tx["itemCode"] ?? ""),
             vendor:   String(tx["vendor"]   ?? ""),
@@ -1033,14 +1088,14 @@ export function buildServer(sandbox: boolean) {
             const existingTxRows = parseTxRows(SANDBOX_TX_HEADERS, SANDBOX_TX_ROWS);
             const dupAlerts = detectDuplicates(existingTxRows, incoming);
 
-            const txWithDate = transactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
+            const txWithDate = sanitizedTransactions.map(tx => ({ date: today, ...tx } as Record<string, unknown>));
             const lines = txWithDate.map(tx =>
               `  ${tx["date"]}  ${tx["itemCode"]}  $${Number(tx["amount"]).toFixed(2)}` +
               (tx["vendor"]        ? `  (${tx["vendor"]})`          : "") +
               (tx["description"]   ? `  — ${tx["description"]}`     : "") +
               (tx["attachmentUrl"] ? `  📎 ${tx["attachmentUrl"]}`  : "")
             );
-            const bigTx = transactions.find(tx => Number(tx.amount) > 5_000);
+            const bigTx = sanitizedTransactions.find(tx => Number(tx["amount"]) > 5_000);
             let msg = `✅ Would record ${transactions.length} transaction(s) on "${jobName}":\n\n${lines.join("\n")}`;
             if (bigTx) {
               msg += "\n\n⚠️  OVER-BUDGET ALERT (simulated) — transaction exceeds $5,000 threshold for demo purposes.";
@@ -1049,10 +1104,16 @@ export function buildServer(sandbox: boolean) {
             return sandboxOk(msg);
           }
 
-          // Pre-fetch existing transactions for duplicate detection (don't let failures block the write)
+          // Pre-fetch existing transactions for duplicate detection.
+          // Hard cap at 4s — if Apps Script is cold-starting we skip the check
+          // and proceed to the write immediately. The write itself has a 55s
+          // budget; a slow pre-fetch must never eat into it.
           let dupAlerts: DuplicateAlert[] = [];
           try {
-            const txData = await budgetGet(`getJobTransactions&jobName=${encodeURIComponent(jobName)}`);
+            const txData = await budgetGet(
+              `getJobTransactions&jobName=${encodeURIComponent(jobName)}`,
+              4_000,
+            );
             if (!txData.error) {
               const existingTxRows = parseTxRows(
                 txData.headers  ?? [],
@@ -1062,10 +1123,10 @@ export function buildServer(sandbox: boolean) {
               dupAlerts = detectDuplicates(existingTxRows, incoming);
             }
           } catch {
-            // Duplicate detection is non-blocking — proceed with the write regardless
+            // Pre-fetch timed out or failed — skip duplicate check, write proceeds
           }
 
-          const txWithDate = transactions.map(tx => ({ date: today, ...tx }));
+          const txWithDate = sanitizedTransactions.map(tx => ({ date: today, ...tx }));
           const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
           if (!result.success) return fail(result.error ?? "Unknown error from Apps Script.");
 
@@ -1094,7 +1155,11 @@ export function buildServer(sandbox: boolean) {
               (description ? `\n  Description: ${description}` : "")
             );
           }
-          const result = await budgetPost("addCostCode", { code, category, description });
+          const result = await budgetPost("addCostCode", {
+            code:        sanitizeSheetValue(code),
+            category:    category    ? sanitizeSheetValue(category)    : undefined,
+            description: description ? sanitizeSheetValue(description) : undefined,
+          });
           return result.success ? ok(`✅ Cost code "${code}" added successfully.`) : fail(result.error ?? "Unknown error from Apps Script.");
         }
 
@@ -1111,7 +1176,12 @@ export function buildServer(sandbox: boolean) {
               (description  ? `\n  Description: ${description}` : "")
             );
           }
-          const result = await budgetPost("updateCostCode", { existingCode, newCode, category, description });
+          const result = await budgetPost("updateCostCode", {
+            existingCode: sanitizeSheetValue(existingCode),
+            newCode:      newCode      ? sanitizeSheetValue(newCode)      : undefined,
+            category:     category     ? sanitizeSheetValue(category)     : undefined,
+            description:  description  ? sanitizeSheetValue(description)  : undefined,
+          });
           return result.success
             ? ok(`✅ Cost code updated: "${existingCode}"${newCode ? ` → "${newCode}"` : ""}.`)
             : fail(result.error ?? "Unknown error from Apps Script.");
@@ -1129,7 +1199,12 @@ export function buildServer(sandbox: boolean) {
               (vendorName ? ` (${vendorName})` : "")
             );
           }
-          const result = await budgetPost("updateSubBid", { jobName, itemCode, subBidAmount, vendorName });
+          const result = await budgetPost("updateSubBid", {
+            jobName,
+            itemCode:   sanitizeSheetValue(itemCode),
+            subBidAmount,
+            vendorName: vendorName ? sanitizeSheetValue(vendorName) : undefined,
+          });
           return result.success
             ? ok(`✅ Sub bid updated for "${itemCode}" on "${jobName}": $${subBidAmount.toFixed(2)}${vendorName ? ` (${vendorName})` : ""}.`)
             : fail(result.error ?? "Unknown error from Apps Script.");
@@ -1140,6 +1215,8 @@ export function buildServer(sandbox: boolean) {
           const { jobName: jobInput, completionDate, notes } = args as {
             jobName: string; completionDate?: string; notes?: string;
           };
+          const completeDateErr = validateISODate(completionDate, "completionDate");
+          if (completeDateErr) return fail(completeDateErr);
           const jobName = await resolveJobName(jobInput, sandbox);
           const date    = completionDate ?? todayISO();
           if (sandbox) {
@@ -1148,7 +1225,11 @@ export function buildServer(sandbox: boolean) {
               (notes ? `\n  Notes: ${notes}` : "")
             );
           }
-          const result = await budgetPost("markJobComplete", { jobName, completionDate: date, notes });
+          const result = await budgetPost("markJobComplete", {
+            jobName,
+            completionDate: date,
+            notes: notes ? sanitizeSheetValue(notes) : undefined,
+          });
           return result.success
             ? ok(`✅ Job "${jobName}" marked as completed on ${date}.`)
             : fail(result.error ?? "Unknown error from Apps Script.");
@@ -1175,13 +1256,25 @@ export function buildServer(sandbox: boolean) {
           if (data.error) return fail(data.error);
           const rows: string[][] = data.rows ?? [];
           const headers: string[] = data.headers ?? [];
-          const contractValue = parseDollar(data.contractValue ?? data.summary?.contractValue);
+          // Guard against Apps Script returning no contractValue (empty/unfilled cell).
+          // parseDollar("") = 0, which would produce "Margin: -Infinity%" or misleading $0.
+          const rawContractValue = data.contractValue ?? data.summary?.contractValue;
+          if (rawContractValue === undefined || rawContractValue === null || String(rawContractValue).trim() === "") {
+            return fail(
+              `No contract value is set for "${jobName}". ` +
+              "Set the contract value in the job summary section, then try again."
+            );
+          }
+          const contractValue = parseDollar(rawContractValue);
+          if (contractValue <= 0) {
+            return fail(`Contract value for "${jobName}" is $0 or negative ($${contractValue.toFixed(2)}). Verify the job setup.`);
+          }
           const actualIdx     = headers.findIndex((h: string) => /actual/i.test(h));
           const actuals = actualIdx >= 0
             ? rows.reduce((sum, r) => sum + parseDollar(r[actualIdx]), 0)
             : 0;
           const profit = contractValue - actuals;
-          const margin = contractValue > 0 ? (profit / contractValue) * 100 : 0;
+          const margin = (profit / contractValue) * 100;
           return ok(
             `Profitability for "${jobName}":\n\n` +
             `  Contract Value:  $${contractValue.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
@@ -1192,16 +1285,23 @@ export function buildServer(sandbox: boolean) {
         }
 
         // ── get_overbudget_report ────────────────────────────────────────────
+        // NOTE(arch): In production this makes one budgetGet per job (sequential).
+        // For N jobs: (N+1)×20s total. This will timeout on Netlify for any
+        // real portfolio. A batch "getAllJobBudgets" Apps Script endpoint is
+        // required to make this tool viable at scale.
         case "get_overbudget_report": {
           if (sandbox) {
+            // Use SANDBOX_JOBS[0] as the representative job for the shared mock
+            // budget rows. Previously this looped all jobs × all rows, incorrectly
+            // reporting every overrun for every job (each job shares the same mock
+            // budget data, so the same row would appear 3× — once per sandbox job).
             type OverRow = [string, string, string, string, string];
             const flagged: OverRow[] = [];
-            for (const job of SANDBOX_JOBS) {
-              for (const r of SANDBOX_BUDGET_ROWS) {
-                const remaining = parseDollar(r[5]);
-                if (remaining < 0) {
-                  flagged.push([job, r[0], r[1], r[3], r[5]]);
-                }
+            const demoJob = SANDBOX_JOBS[0];
+            for (const r of SANDBOX_BUDGET_ROWS) {
+              const remaining = parseDollar(r[5]);
+              if (remaining < 0) {
+                flagged.push([demoJob, r[0], r[1], r[3], r[5]]);
               }
             }
             if (!flagged.length) return sandboxOk("No over-budget cost codes found across all jobs. ✅");
@@ -1355,7 +1455,14 @@ export function buildServer(sandbox: boolean) {
               (notes   ? `\n  Notes:   ${notes}`   : "")
             );
           }
-          const result = await budgetPost("addSub", { company, trade, contact, phone, email, notes });
+          const result = await budgetPost("addSub", {
+            company: sanitizeSheetValue(company),
+            trade:   sanitizeSheetValue(trade),
+            contact: contact ? sanitizeSheetValue(contact) : undefined,
+            phone:   phone   ? sanitizeSheetValue(phone)   : undefined,
+            email:   email   ? sanitizeSheetValue(email)   : undefined,
+            notes:   notes   ? sanitizeSheetValue(notes)   : undefined,
+          });
           return result.success
             ? ok(`✅ Sub "${company}" (${trade}) added to rolodex. ID: ${result.subId ?? "assigned"}`)
             : fail(result.error ?? "Unknown error from Apps Script.");
@@ -1364,6 +1471,11 @@ export function buildServer(sandbox: boolean) {
         // ── acknowledge_transactions ─────────────────────────────────────────
         case "acknowledge_transactions": {
           const { jobName: jobInput, rowIndices } = args as { jobName: string; rowIndices: number[] };
+          if (!Array.isArray(rowIndices) || rowIndices.length === 0)
+            return fail("rowIndices must be a non-empty array of positive integers.");
+          const badIndices = rowIndices.filter(i => !Number.isInteger(i) || i < 1);
+          if (badIndices.length > 0)
+            return fail(`Invalid row indices: [${badIndices.join(", ")}]. All values must be positive integers (≥ 1).`);
           const jobName = await resolveJobName(jobInput, sandbox);
           if (sandbox) {
             return sandboxOk(
@@ -1382,16 +1494,21 @@ export function buildServer(sandbox: boolean) {
           const { jobName: jobInput, amount, date, description } = args as {
             jobName: string; amount: number; date?: string; description?: string;
           };
+          if (typeof amount !== "number" || amount <= 0)
+            return fail("amount must be a positive number greater than zero.");
+          const drawDateErr = validateISODate(date, "date");
+          if (drawDateErr) return fail(drawDateErr);
           const jobName  = await resolveJobName(jobInput, sandbox);
           const drawDate = date ?? todayISO();
+          const safeDesc = description ? sanitizeSheetValue(description) : "Profit draw";
           if (sandbox) {
             return sandboxOk(
               `✅ Would record profit draw of $${amount.toFixed(2)} on "${jobName}" on ${drawDate}\n` +
-              `  Description: ${description ?? "Profit draw"}`
+              `  Description: ${safeDesc}`
             );
           }
           const result = await budgetPost("addProfitDraw", {
-            jobName, amount, date: drawDate, description: description ?? "Profit draw",
+            jobName, amount, date: drawDate, description: safeDesc,
           });
           return result.success
             ? ok(`✅ Profit draw of $${amount.toFixed(2)} recorded for "${jobName}" on ${drawDate}.`)
@@ -1412,6 +1529,14 @@ export function buildServer(sandbox: boolean) {
           return ok(
             "⏳ Job creation is taking longer than expected (Google Sheets template copy can exceed 60s). " +
             "The operation may have already completed — check your spreadsheet to verify the job tab exists before retrying." +
+            diagReport
+          );
+        }
+        if (name === "add_transactions") {
+          return ok(
+            "⏳ The transaction write is taking longer than expected. " +
+            "The operation may have already completed — open your spreadsheet and verify the transactions appear " +
+            "before re-entering them. Re-entering without checking will create duplicates." +
             diagReport
           );
         }
