@@ -1130,7 +1130,7 @@ export function buildServer(sandbox: boolean) {
           const result = await budgetPost("addTransactions", { jobName, transactions: txWithDate });
           if (!result.success) return fail(result.error ?? "Unknown error from Apps Script.");
 
-          let msg = `✅ ${result.message}`;
+          let msg = `✅ ${result.message ?? `${txWithDate.length} transaction(s) recorded on "${jobName}".`}`;
           const warnings: BudgetWarning[] = result.budgetWarnings ?? [];
           if (warnings.length > 0) {
             msg += "\n\n⚠️  OVER-BUDGET ALERT — The following cost codes have exceeded their budget:";
@@ -1533,10 +1533,12 @@ export function buildServer(sandbox: boolean) {
           );
         }
         if (name === "add_transactions") {
-          return ok(
-            "⏳ The transaction write is taking longer than expected. " +
-            "The operation may have already completed — open your spreadsheet and verify the transactions appear " +
-            "before re-entering them. Re-entering without checking will create duplicates." +
+          return fail(
+            "⚠️ The transaction write timed out before Google Apps Script confirmed success — " +
+            "the data was NOT confirmed written to your spreadsheet. " +
+            "Open your spreadsheet NOW and check whether the transaction(s) appear. " +
+            "If they are there, no action needed. " +
+            "If they are missing, re-enter them (the timed-out write did not complete)." +
             diagReport
           );
         }
