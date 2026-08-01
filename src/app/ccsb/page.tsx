@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type CostCode   = { code: string; description: string };
-type TxRow      = { itemCode: string; amount: string; vendor: string; date: string; description: string };
+type TxRow      = { itemCode: string; amount: string; vendor: string; date: string; description: string; paymentMethod: string };
 type BudgetLine = { itemCode: string; budget: string };
 type CrmLead    = { rowIndex: number; leadId: string; clientName: string; address: string; projectDesc: string; data: Record<string, string> };
 type JobBudget  = { headers: string[]; rows: string[][]; scopeOfWork?: string };
@@ -37,8 +37,61 @@ const IP_STAGE_POSITIONS = [12, 13, 14];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const today       = () => new Date().toISOString().split("T")[0];
-const emptyRow    = (): TxRow      => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "" });
+const emptyRow    = (): TxRow      => ({ itemCode: "", amount: "", vendor: "", date: today(), description: "", paymentMethod: "" });
 const emptyBudget = (): BudgetLine => ({ itemCode: "", budget: "" });
+
+// ── QB Export helpers ─────────────────────────────────────────────────────
+type QbTxRow = TxRow & { jobName: string };
+
+const QB_ACCOUNT_MAP: Array<[string, string]> = [
+  ["subcontract", "Subcontractors"],
+  ["labor",       "Labor - Direct"],
+  ["materials",   "Materials & Supplies"],
+  ["equipment",   "Equipment Rental"],
+];
+
+function qboDate(d: string): string {
+  const p = d ? d.split("-") : [];
+  return p.length === 3 ? `${p[1]}/${p[2]}/${p[0]}` : d;
+}
+
+function qboAccount(itemCode: string): string {
+  const c = itemCode.toLowerCase();
+  const match = QB_ACCOUNT_MAP.find(([prefix]) => c.startsWith(prefix));
+  return match ? match[1] : "Other Job Costs";
+}
+
+function csvCell(v: string | number): string {
+  const s = String(v);
+  return (s.includes(",") || s.includes('"') || s.includes("\n"))
+    ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function buildBillsCsv(txs: QbTxRow[], monthKey: string): string {
+  const header = ["Bill No.", "Vendor", "Bill Date", "Due Date", "Type",
+    "Category / Account", "Description", "Amount", "Customer / Project"]
+    .map(csvCell).join(",");
+  const lines = txs.map((tx, i) => [
+    `CW-${monthKey}-${String(i + 1).padStart(3, "0")}`,
+    tx.vendor || "",
+    qboDate(tx.date),
+    "",
+    "Category",
+    qboAccount(tx.itemCode),
+    tx.description || tx.itemCode,
+    Math.abs(parseFloat(tx.amount) || 0).toFixed(2),
+    tx.jobName,
+  ].map(csvCell).join(","));
+  return [header, ...lines].join("\r\n");
+}
+
+function downloadCsv(content: string, filename: string): void {
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
 
 // ── Number formatters ──────────────────────────────────────────────────────
 // Accounting: positives as $1,234.56 — negatives as ($1,234.56)
@@ -108,7 +161,7 @@ export default function BudgetManager() {
   const [loadError,  setLoadError]  = useState(false);
   const [jobs,       setJobs]       = useState<string[]>([]);
   const [costCodes,  setCostCodes]  = useState<CostCode[]>([]);
-  const [activeTab,  setActiveTab]  = useState<"new-job" | "transaction" | "crm" | "summary">("new-job");
+  const [activeTab,  setActiveTab]  = useState<"new-job" | "transaction" | "crm" | "summary" | "qb-export">("new-job");
   const [submitting, setSubmitting] = useState(false);
   const [result,     setResult]     = useState<{ success: boolean; message: string } | null>(null);
 
@@ -139,6 +192,15 @@ export default function BudgetManager() {
   const [filterYear,     setFilterYear]     = useState("all");
   const [filterQuarter,  setFilterQuarter]  = useState("all");
   const [filterMonth,    setFilterMonth]    = useState("all");
+
+  // ── QB Export ──────────────────────────────────────────────────────────────
+  const [qbMonth,   setQbMonth]   = useState<string>(() => {
+    const d = new Date(); d.setMonth(d.getMonth() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const [qbRawTx,   setQbRawTx]   = useState<QbTxRow[]>([]);
+  const [qbLoading, setQbLoading] = useState(false);
+  const [qbLoaded,  setQbLoaded]  = useState(false);
 
   // ── Computed ──────────────────────────────────────────────────────────────
 
@@ -343,6 +405,32 @@ export default function BudgetManager() {
     finally  { setSubmitting(false); }
   };
 
+  // ── QB Export: load all transactions across all jobs ──────────────────────
+  const loadQbTransactions = async () => {
+    setQbLoading(true); setQbLoaded(false);
+    try {
+      const results = await Promise.all(
+        jobs.map(async (jobName) => {
+          const res  = await fetch(`/api/job-transactions?jobName=${encodeURIComponent(jobName)}`);
+          const data = await res.json();
+          const txs: Record<string, string>[] = data.transactions || [];
+          return txs.map(tx => ({
+            itemCode:      tx.itemCode      || "",
+            amount:        String(tx.amount || ""),
+            vendor:        tx.vendor        || "",
+            date:          tx.date          || "",
+            description:   tx.description   || "",
+            paymentMethod: tx.paymentMethod || "",
+            jobName,
+          }));
+        })
+      );
+      setQbRawTx(results.flat());
+      setQbLoaded(true);
+    } catch { /* leave qbLoaded false so user sees load button again */ }
+    finally  { setQbLoading(false); }
+  };
+
   // ── Style shortcuts ───────────────────────────────────────────────────────
   const innerClass  = "w-full bg-cream-100 border border-cream-300 px-3 py-2 text-navy-500 text-sm focus:outline-none focus:border-tan-400 transition-colors";
   const addBtnClass = "text-xs tracking-wider px-4 py-2 border border-tan-500 text-tan-600 hover:bg-tan-500 hover:text-white transition-colors flex-shrink-0 ml-4";
@@ -380,14 +468,14 @@ export default function BudgetManager() {
           <>
             {/* ── Main tabs ── */}
             <div className="flex border-b border-cream-300 mb-8 overflow-x-auto">
-              {(["new-job", "transaction", "crm", "summary"] as const).map(tab => (
+              {(["new-job", "transaction", "crm", "summary", "qb-export"] as const).map(tab => (
                 <button key={tab} onClick={() => { setActiveTab(tab); setResult(null); }}
                   className={`px-5 py-3 text-xs tracking-widest uppercase font-medium transition-colors whitespace-nowrap ${
                     activeTab === tab
                       ? "border-b-2 border-tan-500 text-tan-600"
                       : "text-navy-400 hover:text-navy-600"
                   }`}>
-                  {tab === "new-job" ? "New Job" : tab === "transaction" ? "Add Transactions" : tab === "crm" ? "CRM" : "Summary"}
+                  {tab === "new-job" ? "New Job" : tab === "transaction" ? "Add Transactions" : tab === "crm" ? "CRM" : tab === "summary" ? "Summary" : "QB Export"}
                 </button>
               ))}
             </div>
@@ -613,6 +701,18 @@ export default function BudgetManager() {
                             <label className="block text-navy-400 text-xs tracking-wider uppercase mb-1">Description</label>
                             <input value={row.description} onChange={e => updateRow(i, "description", e.target.value)} className={innerClass} placeholder="Tile for master bath floor" />
                           </div>
+                          <div className="col-span-2">
+                            <label className="block text-navy-400 text-xs tracking-wider uppercase mb-1">
+                              Payment Method <span className="normal-case text-cream-500 tracking-normal">(required for subcontractor 1099 accuracy)</span>
+                            </label>
+                            <select value={row.paymentMethod} onChange={e => updateRow(i, "paymentMethod", e.target.value)} className={innerClass}>
+                              <option value="">— Not specified —</option>
+                              <option value="ACH / Bank Transfer">ACH / Bank Transfer</option>
+                              <option value="Check">Check</option>
+                              <option value="Credit Card">Credit Card</option>
+                              <option value="Cash">Cash</option>
+                            </select>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -712,6 +812,144 @@ export default function BudgetManager() {
                 )}
               </div>
             )}
+
+            {/* ════════════════ QB EXPORT ════════════════ */}
+            {activeTab === "qb-export" && (() => {
+              const [qbYear, qbMon] = qbMonth.split("-");
+              const monthLabel = `${MONTH_NAMES[parseInt(qbMon, 10) - 1]} ${qbYear}`;
+              const monthKey   = qbMonth.replace("-", "");
+
+              const filtered   = qbRawTx.filter(tx => tx.date && tx.date.startsWith(`${qbYear}-${qbMon}`));
+              const withVendor = filtered.filter(tx => tx.vendor);
+              const noVendor   = filtered.filter(tx => !tx.vendor);
+              const supplierTx = withVendor.filter(tx => !tx.itemCode.toLowerCase().startsWith("subcontract"));
+              const subTx      = withVendor.filter(tx =>  tx.itemCode.toLowerCase().startsWith("subcontract"));
+              const subCC      = subTx.filter(tx => tx.paymentMethod === "Credit Card");
+              const sub1099    = subTx.filter(tx => tx.paymentMethod !== "Credit Card");
+              const subUnknown = sub1099.filter(tx => !tx.paymentMethod);
+
+              return (
+                <div className="space-y-6">
+                  <h2 className="text-navy-500 text-xl font-semibold" style={{ fontFamily: "var(--font-playfair)" }}>
+                    QB Monthly Export
+                  </h2>
+
+                  {/* Info box */}
+                  <div className="border-l-4 border-tan-500 bg-tan-50/30 px-5 py-4 space-y-1.5 text-xs text-navy-400">
+                    <p>Generates QBO-formatted Bills CSVs for upload via <strong>Settings → Import Data → Bills</strong>.</p>
+                    <p>Import <strong>Supplier Bills</strong> and <strong>Subcontractor Bills</strong> as separate files. Then mark each bill as paid inside QBO.</p>
+                    <p className="text-amber-700">1099 rule: Credit card payments are excluded from 1099-NEC — only ACH, check, and cash payments count toward the $600 threshold.</p>
+                  </div>
+
+                  {/* Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-end">
+                    <div>
+                      <label className={labelClass}>Export Month</label>
+                      <input
+                        type="month"
+                        value={qbMonth}
+                        onChange={e => { setQbMonth(e.target.value); setQbLoaded(false); }}
+                        className={inputClass}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={loadQbTransactions}
+                      disabled={qbLoading || jobs.length === 0}
+                      className={submitClass}>
+                      {qbLoading ? "Loading transactions…" : "Load Transactions"}
+                    </button>
+                  </div>
+
+                  {/* Results */}
+                  {qbLoaded && (
+                    <div className="space-y-4">
+                      {/* Stats */}
+                      <div className="bg-white border border-cream-300 p-5 space-y-4">
+                        <p className="text-navy-400 text-xs tracking-widest uppercase font-semibold">
+                          Export Preview — {monthLabel}
+                        </p>
+
+                        <div className="grid grid-cols-2 gap-5">
+                          <div className="border-l-2 border-tan-500 pl-4">
+                            <p className="text-navy-500 text-2xl font-semibold">{supplierTx.length}</p>
+                            <p className="text-navy-400 text-xs tracking-wider uppercase mt-0.5">Supplier Bill Lines</p>
+                            <p className="text-cream-500 text-xs mt-1">Materials, equipment, labor (non-sub)</p>
+                          </div>
+                          <div className="border-l-2 border-tan-500 pl-4">
+                            <p className="text-navy-500 text-2xl font-semibold">{subTx.length}</p>
+                            <p className="text-navy-400 text-xs tracking-wider uppercase mt-0.5">Subcontractor Bill Lines</p>
+                            {subTx.length > 0 && (
+                              <p className="text-xs mt-1">
+                                <span className="text-green-700">{sub1099.length} 1099-eligible</span>
+                                {subCC.length > 0 && <span className="text-amber-600"> · {subCC.length} CC (excluded from 1099)</span>}
+                                {subUnknown.length > 0 && <span className="text-red-500"> · {subUnknown.length} payment method missing</span>}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {noVendor.length > 0 && (
+                          <p className="text-amber-600 text-xs border-t border-cream-200 pt-3">
+                            {noVendor.length} transaction{noVendor.length !== 1 ? "s" : ""} excluded from export — no vendor name. Go back to Add Transactions to fill in the vendor.
+                          </p>
+                        )}
+                        {filtered.length === 0 && (
+                          <p className="text-cream-500 text-sm">No transactions found for {monthLabel}.</p>
+                        )}
+                      </div>
+
+                      {/* Download buttons */}
+                      {(supplierTx.length > 0 || subTx.length > 0) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <button
+                            type="button"
+                            onClick={() => downloadCsv(buildBillsCsv(supplierTx, monthKey), `supplier-bills-${qbMonth}.csv`)}
+                            disabled={supplierTx.length === 0}
+                            className="py-4 border border-navy-500 text-navy-500 text-xs tracking-widest uppercase hover:bg-navy-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                            Download Supplier Bills CSV ({supplierTx.length} lines)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadCsv(buildBillsCsv(subTx, monthKey), `subcontractor-bills-${qbMonth}.csv`)}
+                            disabled={subTx.length === 0}
+                            className="py-4 border border-navy-500 text-navy-500 text-xs tracking-widest uppercase hover:bg-navy-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                            Download Subcontractor Bills CSV ({subTx.length} lines)
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Account mapping reference */}
+                      <div className="bg-cream-50 border border-cream-300 p-4">
+                        <p className="text-navy-400 text-xs tracking-widest uppercase mb-3 font-semibold">QBO Account Mapping Reference</p>
+                        <p className="text-cream-500 text-xs mb-3">These account names must exist in your QBO Chart of Accounts (COGS type) before uploading.</p>
+                        <div className="space-y-1.5">
+                          {[
+                            ["Subcontractor — *", "Subcontractors", "Map to 1099-NEC Box 1 in Taxes → Contractors → Prepare 1099s"],
+                            ["Labor — *",         "Labor - Direct",        ""],
+                            ["Materials — *",     "Materials & Supplies",  ""],
+                            ["Equipment — *",     "Equipment Rental",      ""],
+                            ["Other",             "Other Job Costs",       ""],
+                          ].map(([code, account, note]) => (
+                            <div key={code} className="grid grid-cols-3 gap-3 text-xs">
+                              <span className="font-mono text-navy-400">{code}</span>
+                              <span className="text-navy-500 font-medium">{account}</span>
+                              <span className="text-cream-500">{note}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!qbLoaded && !qbLoading && (
+                    <p className="text-cream-500 text-sm text-center py-10">
+                      Select a month and click Load Transactions to preview your export.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* ════════════════ SUMMARY ════════════════ */}
             {activeTab === "summary" && (
